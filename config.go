@@ -4,6 +4,8 @@ package kinsumer
 
 import (
 	"time"
+
+	"github.com/ericksonjoseph/kinsumer/statsd"
 )
 
 //TODO: Update documentation to include the defaults
@@ -11,7 +13,7 @@ import (
 
 // Config holds all configuration values for a single Kinsumer instance
 type Config struct {
-	stats StatReceiver
+	stats statsd.StatReceiver
 
 	// ---------- [ Per Shard Worker ] ----------
 	// Time to sleep if no records are found
@@ -88,7 +90,7 @@ func (c Config) WithBufferSize(bufferSize int) Config {
 }
 
 // WithStats returns a Config with a modified stats
-func (c Config) WithStats(stats StatReceiver) Config {
+func (c Config) WithStats(stats statsd.StatReceiver) Config {
 	c.stats = stats
 	return c
 }

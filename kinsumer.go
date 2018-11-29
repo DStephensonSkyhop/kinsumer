@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	checkpointer "github.com/ericksonjoseph/kinsumer/checkpointer"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -25,9 +26,9 @@ type shardConsumerError struct {
 }
 
 type consumedRecord struct {
-	record       *kinesis.Record // Record retrieved from kinesis
-	checkpointer *checkpointer   // Object that will store the checkpoint back to the database
-	retrievedAt  time.Time       // Time the record was retrieved from Kinesis
+	record       *kinesis.Record            // Record retrieved from kinesis
+	Checkpointer *checkpointer.Checkpointer // Object that will store the checkpoint back to the database
+	retrievedAt  time.Time                  // Time the record was retrieved from Kinesis
 }
 
 // Kinsumer is a Kinesis Consumer that tries to reduce duplicate reads while allowing for multiple
@@ -332,7 +333,7 @@ func (k *Kinsumer) kinesisStreamReady() error {
 
 // Run runs the main kinesis consumer process. This is a non-blocking call, use Stop() to force it to return.
 // This goroutine is responsible for startin/stopping consumers, aggregating all consumers' records,
-// updating checkpointers as records are consumed, and refreshing our shard/client list and leadership
+// updating Checkpointers as records are consumed, and refreshing our shard/client list and leadership
 //TODO: Can we unit test this at all?
 func (k *Kinsumer) Run(commitTicker chan bool) error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
@@ -416,7 +417,7 @@ func (k *Kinsumer) Run(commitTicker chan bool) error {
 				return
 			case record = <-input:
 			case output <- record:
-				record.checkpointer.update(aws.StringValue(record.record.SequenceNumber))
+				record.Checkpointer.Update(aws.StringValue(record.record.SequenceNumber))
 				record = nil
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
