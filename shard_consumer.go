@@ -101,13 +101,8 @@ func (k *Kinsumer) captureShard(shardID string) (*checkpointer, error) {
 // consume is a blocking call that captures then consumes the given shard in a loop.
 // It is also responsible for writing out the checkpoint updates to dynamo.
 // TODO: There are no tests for this file. Not sure how to even unit test this.
-func (k *Kinsumer) consume(shardID string) {
+func (k *Kinsumer) consume(shardID string, commitTicker chan bool) {
 	defer k.waitGroup.Done()
-
-	// commitTicker is used to periodically commit, so that we don't hammer dynamo every time
-	// a shard wants to be check pointed
-	commitTicker := time.NewTicker(k.config.commitFrequency)
-	defer commitTicker.Stop()
 
 	// capture the checkpointer
 	checkpointer, err := k.captureShard(shardID)
@@ -160,7 +155,7 @@ mainloop:
 		select {
 		case <-k.stop:
 			return
-		case <-commitTicker.C:
+		case <-commitTicker:
 			finishCommitted, err := checkpointer.commit()
 			if err != nil {
 				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
@@ -210,7 +205,7 @@ mainloop:
 				// Loop until we stop or the record is consumed, checkpointing if necessary.
 				for {
 					select {
-					case <-commitTicker.C:
+					case <-commitTicker:
 						finishCommitted, err := checkpointer.commit()
 						if err != nil {
 							k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}

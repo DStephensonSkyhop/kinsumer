@@ -185,7 +185,7 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 
 // startConsumers launches a shard consumer for each shard we should own
 // TODO: Can we unit test this at all?
-func (k *Kinsumer) startConsumers() error {
+func (k *Kinsumer) startConsumers(commitTicker chan bool) error {
 	k.stop = make(chan struct{})
 	assigned := false
 
@@ -193,16 +193,30 @@ func (k *Kinsumer) startConsumers() error {
 		return nil
 	}
 
+	var tickers []chan bool
+
 	for i, shard := range k.shardIDs {
 		if (i % k.totalClients) == k.thisClient {
 			k.waitGroup.Add(1)
 			assigned = true
-			go k.consume(shard)
+			ct := make(chan bool)
+			tickers = append(tickers, ct)
+			go k.consume(shard, ct)
 		}
 	}
 	if len(k.shardIDs) != 0 && !assigned {
 		return ErrNoShardsAssigned
 	}
+
+	go func() {
+		for {
+			<-commitTicker
+			for _, t := range tickers {
+				t <- true
+			}
+		}
+	}()
+
 	return nil
 }
 
@@ -320,7 +334,7 @@ func (k *Kinsumer) kinesisStreamReady() error {
 // This goroutine is responsible for startin/stopping consumers, aggregating all consumers' records,
 // updating checkpointers as records are consumed, and refreshing our shard/client list and leadership
 //TODO: Can we unit test this at all?
-func (k *Kinsumer) Run() error {
+func (k *Kinsumer) Run(commitTicker chan bool) error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
 		return err
 	}
@@ -376,7 +390,7 @@ func (k *Kinsumer) Run() error {
 		}()
 
 		var record *consumedRecord
-		if err := k.startConsumers(); err != nil {
+		if err := k.startConsumers(commitTicker); err != nil {
 			k.errors <- fmt.Errorf("error starting consumers: %s", err)
 		}
 		defer k.stopConsumers()
@@ -414,7 +428,7 @@ func (k *Kinsumer) Run() error {
 					shardChangeTicker.Stop()
 					k.stopConsumers()
 					record = nil
-					if err := k.startConsumers(); err != nil {
+					if err := k.startConsumers(commitTicker); err != nil {
 						k.errors <- fmt.Errorf("error restarting consumers: %s", err)
 					}
 					// We create a new shardChangeTicker here so that the time it takes to stop and
