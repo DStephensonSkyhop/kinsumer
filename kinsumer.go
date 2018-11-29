@@ -18,6 +18,10 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type loggerInterface interface {
+	Debug(args ...interface{})
+}
+
 type shardConsumerError struct {
 	shardID string
 	action  string
@@ -59,27 +63,31 @@ type Kinsumer struct {
 	leaderWG              sync.WaitGroup            // waitGroup for the leader loop
 	maxAgeForClientRecord time.Duration             // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
 	maxAgeForLeaderRecord time.Duration             // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
+	logger                loggerInterface           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
-func New(streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+func New(logger loggerInterface, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
 	s, err := session.NewSession()
 	if err != nil {
 		return nil, err
 	}
-	return NewWithSession(s, streamName, applicationName, clientName, config)
+	return NewWithSession(logger, s, streamName, applicationName, clientName, config)
 }
 
 // NewWithSession should be used if you want to override the Kinesis and Dynamo instances with a non-default aws session
-func NewWithSession(session *session.Session, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+func NewWithSession(logger loggerInterface, session *session.Session, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
 	k := kinesis.New(session)
 	d := dynamodb.New(session)
 
-	return NewWithInterfaces(k, d, streamName, applicationName, clientName, config)
+	return NewWithInterfaces(logger, k, d, streamName, applicationName, clientName, config)
 }
 
 // NewWithInterfaces allows you to override the Kinesis and Dynamo instances for mocking or using a local set of servers
-func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.DynamoDBAPI, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+func NewWithInterfaces(logger loggerInterface, kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.DynamoDBAPI, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+	if logger == nil {
+		return nil, ErrNoLoggerInterface
+	}
 	if kinesis == nil {
 		return nil, ErrNoKinesisInterface
 	}
@@ -113,6 +121,7 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 		config:                config,
 		maxAgeForClientRecord: config.shardCheckFrequency * 5,
 		maxAgeForLeaderRecord: config.leaderActionFrequency * 5,
+		logger:                logger,
 	}
 	return consumer, nil
 }
