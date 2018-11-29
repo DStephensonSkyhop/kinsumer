@@ -5,6 +5,7 @@ package kinsumer
 import "errors"
 
 var (
+	ErrNoLoggerInterface = errors.New("Need a logger implementation")
 	// ErrRunTwice - Run() can only ever be run once
 	ErrRunTwice = errors.New("Run() can only ever be run once")
 	// ErrNoKinesisInterface - Need a kinesis instance
