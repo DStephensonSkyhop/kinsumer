@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	"github.com/twinj/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -109,7 +108,7 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 		checkpointTableName:   applicationName + "_checkpoints",
 		clientsTableName:      applicationName + "_clients",
 		metadataTableName:     applicationName + "_metadata",
-		clientID:              uuid.NewV4().String(),
+		clientID:              clientName,
 		clientName:            clientName,
 		config:                config,
 		maxAgeForClientRecord: config.shardCheckFrequency * 5,
