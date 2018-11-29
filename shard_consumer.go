@@ -34,7 +34,7 @@ func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID stri
 	// from the horizon
 	ps := aws.String(sequenceNumber)
 	if sequenceNumber == "" {
-		shardIteratorType = kinesis.ShardIteratorTypeTrimHorizon
+		shardIteratorType = kinesis.ShardIteratorTypeLatest
 		ps = nil
 	}
 
