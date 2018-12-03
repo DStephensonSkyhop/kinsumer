@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	checkpointer "github.com/ericksonjoseph/kinsumer/checkpointer"
 )
 
 const (
@@ -68,11 +69,11 @@ func getRecords(k kinesisiface.KinesisAPI, iterator string) (records []*kinesis.
 }
 
 // captureShard blocks until we capture the given shardID
-func (k *Kinsumer) captureShard(shardID string) (*checkpointer, error) {
+func (k *Kinsumer) captureShard(shardID string) (*checkpointer.Checkpointer, error) {
 	// Attempt to capture the shard in dynamo
 	for {
 		// Ask the checkpointer to capture the shard
-		checkpointer, err := capture(
+		checkpointer, err := checkpointer.Capture(
 			shardID,
 			k.checkpointTableName,
 			k.dynamodb,
@@ -117,15 +118,15 @@ func (k *Kinsumer) consume(shardID string, commitTicker chan bool) {
 		return
 	}
 
-	sequenceNumber := checkpointer.sequenceNumber
+	sequenceNumber := checkpointer.GetSequenceNumber()
 
 	// finished means we have reached the end of the shard but haven't necessarily processed/committed everything
 	finished := false
 	// Make sure we release the shard when we are done.
 	defer func() {
-		innerErr := checkpointer.release()
+		innerErr := checkpointer.Release()
 		if innerErr != nil {
-			k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.release", err: innerErr}
+			k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Release", err: innerErr}
 			return
 		}
 	}()
@@ -147,7 +148,7 @@ mainloop:
 	for {
 		// We have reached the end of the shard's data. Set Finished in dynamo and stop processing.
 		if iterator == "" && !finished {
-			checkpointer.finish(lastSeqNum)
+			checkpointer.Finish(lastSeqNum)
 			finished = true
 		}
 
@@ -155,15 +156,17 @@ mainloop:
 		select {
 		case <-k.stop:
 			return
-		case <-commitTicker:
-			finishCommitted, err := checkpointer.commit()
-			if err != nil {
-				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
-				return
-			}
-			if finishCommitted {
-				return
-			}
+			/*
+				case <-commitTicker:
+					finishCommitted, err := checkpointer.Commit()
+					if err != nil {
+						k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
+						return
+					}
+					if finishCommitted {
+						return
+					}
+			*/
 			// Go back to waiting for a throttle/stop.
 			continue mainloop
 		case <-nextThrottle:
@@ -205,20 +208,22 @@ mainloop:
 				// Loop until we stop or the record is consumed, checkpointing if necessary.
 				for {
 					select {
-					case <-commitTicker:
-						finishCommitted, err := checkpointer.commit()
-						if err != nil {
-							k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.commit", err: err}
-							return
-						}
-						if finishCommitted {
-							return
-						}
+					/*
+						case <-commitTicker:
+							finishCommitted, err := checkpointer.Commit()
+							if err != nil {
+								k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
+								return
+							}
+							if finishCommitted {
+								return
+							}
+					*/
 					case <-k.stop:
 						return
-					case k.records <- &consumedRecord{
-						record:       record,
-						checkpointer: checkpointer,
+					case k.records <- &ConsumedRecord{
+						Record:       record,
+						Checkpointer: checkpointer,
 						retrievedAt:  retrievedAt,
 					}:
 						break RecordLoop
