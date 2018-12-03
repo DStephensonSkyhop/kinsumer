@@ -29,8 +29,8 @@ type shardConsumerError struct {
 	err     error
 }
 
-type consumedRecord struct {
-	record       *kinesis.Record            // Record retrieved from kinesis
+type ConsumedRecord struct {
+	Record       *kinesis.Record            // Record retrieved from kinesis
 	Checkpointer *checkpointer.Checkpointer // Object that will store the checkpoint back to the database
 	retrievedAt  time.Time                  // Time the record was retrieved from Kinesis
 }
@@ -44,8 +44,8 @@ type Kinsumer struct {
 	shardIDs              []string                  // all the shards in the stream, for detecting when the shards change
 	stop                  chan struct{}             // channel used to signal to all the go routines that we want to stop consuming
 	stoprequest           chan bool                 // channel used internally to signal to the main go routine to stop processing
-	records               chan *consumedRecord      // channel for the go routines to put the consumed records on
-	output                chan *consumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
+	records               chan *ConsumedRecord      // channel for the go routines to put the consumed records on
+	output                chan *ConsumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
 	errors                chan error                // channel used to communicate errors back to the caller
 	waitGroup             sync.WaitGroup            // waitGroup to sync the consumers go routines on
 	mainWG                sync.WaitGroup            // WaitGroup for the mainLoop
@@ -110,8 +110,8 @@ func NewWithInterfaces(logger loggerInterface, kinesis kinesisiface.KinesisAPI, 
 		kinesis:               kinesis,
 		dynamodb:              dynamodb,
 		stoprequest:           make(chan bool),
-		records:               make(chan *consumedRecord, config.bufferSize),
-		output:                make(chan *consumedRecord),
+		records:               make(chan *ConsumedRecord, config.bufferSize),
+		output:                make(chan *ConsumedRecord),
 		errors:                make(chan error, 10),
 		shardErrors:           make(chan shardConsumerError, 10),
 		checkpointTableName:   applicationName + "_checkpoints",
@@ -385,7 +385,7 @@ func (k *Kinsumer) Run() error {
 			shardChangeTicker.Stop()
 		}()
 
-		var record *consumedRecord
+		var record *ConsumedRecord
 		if err := k.startConsumers(); err != nil {
 			k.errors <- fmt.Errorf("error starting consumers: %s", err)
 		}
@@ -393,8 +393,8 @@ func (k *Kinsumer) Run() error {
 
 		for {
 			var (
-				input  chan *consumedRecord
-				output chan *consumedRecord
+				input  chan *ConsumedRecord
+				output chan *ConsumedRecord
 			)
 
 			// We only want to be handing one record from the consumers
@@ -412,7 +412,7 @@ func (k *Kinsumer) Run() error {
 				return
 			case record = <-input:
 			case output <- record:
-				record.Checkpointer.Update(aws.StringValue(record.record.SequenceNumber))
+				record.Checkpointer.Update(aws.StringValue(record.Record.SequenceNumber))
 				record = nil
 			case se := <-k.shardErrors:
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
@@ -450,14 +450,14 @@ func (k *Kinsumer) Stop() {
 //
 // if err is non nil an error occurred in the system.
 // if err is nil and data is nil then kinsumer has been stopped
-func (k *Kinsumer) Next() (data []byte, err error) {
+func (k *Kinsumer) Next() (data *ConsumedRecord, err error) {
 	select {
 	case err = <-k.errors:
 		return nil, err
 	case record, ok := <-k.output:
 		if ok {
-			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
-			data = record.record.Data
+			k.config.stats.EventToClient(*record.Record.ApproximateArrivalTimestamp, record.retrievedAt)
+			data = record
 		}
 	}
 

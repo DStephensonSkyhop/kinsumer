@@ -140,10 +140,17 @@ func Capture(
 	return checkpointer, nil
 }
 
-// commit writes the latest SequenceNumber consumed to dynamo and updates LastUpdate.
+// Commit writes the latest SequenceNumber consumed to dynamo and updates LastUpdate.
 // Returns true if we set Finished in dynamo because the library user finished consuming the shard.
 // Once that has happened, the checkpointer should be released and never grabbed again.
 func (cp *Checkpointer) Commit() (bool, error) {
+	return cp.CommitWithSequenceNumber(cp.sequenceNumber)
+}
+
+// CommitWithSequenceNumber writes the provided SequenceNumber to dynamo and updates LastUpdate.
+// Returns true if we set Finished in dynamo because the library user finished consuming the shard.
+// Once that has happened, the checkpointer should be released and never grabbed again.
+func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, error) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
 	if !cp.dirty && !cp.finished {
@@ -151,8 +158,8 @@ func (cp *Checkpointer) Commit() (bool, error) {
 	}
 	now := time.Now()
 
-	sn := &cp.sequenceNumber
-	if cp.sequenceNumber == "" {
+	sn := &sequenceNumber
+	if sequenceNumber == "" {
 		// We are not allowed to pass empty strings to dynamo, so instead pass a nil *string
 		// to 'unset' it
 		sn = nil
@@ -253,6 +260,9 @@ func (cp *Checkpointer) Finish(sequenceNumber string) {
 	cp.finished = true
 }
 
+func (cp *Checkpointer) GetShardID() string {
+	return cp.shardID
+}
 func (cp *Checkpointer) GetSequenceNumber() string {
 	return cp.sequenceNumber
 }

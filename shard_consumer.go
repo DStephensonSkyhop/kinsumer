@@ -161,15 +161,17 @@ mainloop:
 		select {
 		case <-k.stop:
 			return
-		case <-commitTicker.C:
-			finishCommitted, err := checkpointer.commit()
-			if err != nil {
-				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
-				return
-			}
-			if finishCommitted {
-				return
-			}
+			/*
+				case <-commitTicker.C:
+					finishCommitted, err := checkpointer.Commit()
+					if err != nil {
+						k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
+						return
+					}
+					if finishCommitted {
+						return
+					}
+			*/
 			// Go back to waiting for a throttle/stop.
 			continue mainloop
 		case <-nextThrottle:
@@ -211,19 +213,21 @@ mainloop:
 				// Loop until we stop or the record is consumed, checkpointing if necessary.
 				for {
 					select {
-					case <-commitTicker.C:
-						finishCommitted, err := checkpointer.commit()
-						if err != nil {
-							k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
-							return
-						}
-						if finishCommitted {
-							return
-						}
+					/*
+						case <-commitTicker.C:
+							finishCommitted, err := checkpointer.Commit()
+							if err != nil {
+								k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
+								return
+							}
+							if finishCommitted {
+								return
+							}
+					*/
 					case <-k.stop:
 						return
-					case k.records <- &consumedRecord{
-						record:       record,
+					case k.records <- &ConsumedRecord{
+						Record:       record,
 						Checkpointer: checkpointer,
 						retrievedAt:  retrievedAt,
 					}:
