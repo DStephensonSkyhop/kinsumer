@@ -157,7 +157,7 @@ mainloop:
 		case <-k.stop:
 			return
 			/*
-				case <-commitTicker:
+				case <-commitTicker.C:
 					finishCommitted, err := checkpointer.Commit()
 					if err != nil {
 						k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
@@ -209,7 +209,7 @@ mainloop:
 				for {
 					select {
 					/*
-						case <-commitTicker:
+						case <-commitTicker.C:
 							finishCommitted, err := checkpointer.Commit()
 							if err != nil {
 								k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}

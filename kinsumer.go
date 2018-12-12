@@ -400,7 +400,7 @@ func (k *Kinsumer) Run(commitTicker chan bool) error {
 		}()
 
 		var record *ConsumedRecord
-		if err := k.startConsumers(commitTicker); err != nil {
+		if err := k.startConsumers(); err != nil {
 			k.errors <- fmt.Errorf("error starting consumers: %s", err)
 		}
 		defer k.stopConsumers()
