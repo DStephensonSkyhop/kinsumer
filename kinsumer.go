@@ -23,10 +23,11 @@ type loggerInterface interface {
 	Debug(args ...interface{})
 }
 
-type shardConsumerError struct {
-	shardID string
-	action  string
-	err     error
+type ShardConsumerError struct {
+	ShardID string
+	Action  string
+	Error   error
+	Level   string // error levels consist of: WARNING, CRITICAL, FATAL
 }
 
 type ConsumedRecord struct {
@@ -46,10 +47,10 @@ type Kinsumer struct {
 	stoprequest           chan bool                 // channel used internally to signal to the main go routine to stop processing
 	records               chan *ConsumedRecord      // channel for the go routines to put the consumed records on
 	output                chan *ConsumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
-	errors                chan error                // channel used to communicate errors back to the caller
+	errors                chan *ShardConsumerError  // channel used to communicate errors back to the caller
 	waitGroup             sync.WaitGroup            // waitGroup to sync the consumers go routines on
 	mainWG                sync.WaitGroup            // WaitGroup for the mainLoop
-	shardErrors           chan shardConsumerError   // all the errors found by the consumers that were not handled
+	shardErrors           chan ShardConsumerError   // all the errors found by the consumers that were not handled
 	clientsTableName      string                    // dynamo table of info about each client
 	checkpointTableName   string                    // dynamo table of the checkpoints for each shard
 	metadataTableName     string                    // dynamo table of metadata about the leader and shards
@@ -112,8 +113,8 @@ func NewWithInterfaces(logger loggerInterface, kinesis kinesisiface.KinesisAPI, 
 		stoprequest:           make(chan bool),
 		records:               make(chan *ConsumedRecord, config.bufferSize),
 		output:                make(chan *ConsumedRecord),
-		errors:                make(chan error, 10),
-		shardErrors:           make(chan shardConsumerError, 10),
+		errors:                make(chan *ShardConsumerError, 10),
+		shardErrors:           make(chan ShardConsumerError, 10),
 		checkpointTableName:   applicationName + "_checkpoints",
 		clientsTableName:      applicationName + "_clients",
 		metadataTableName:     applicationName + "_metadata",
@@ -166,7 +167,10 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 	}
 
 	shardIDs, err = loadShardIDsFromDynamo(k.dynamodb, k.metadataTableName)
+	//k.logger.Debug("refreshShards - loaded shardIDs: ", shardIDs)
+	//k.logger.Debug("refreshShards - current shardIDs: ", k.shardIDs)
 	if err != nil {
+		k.logger.Debug("refreshShards - load shard IDs error: ", err)
 		return false, err
 	}
 
@@ -174,6 +178,7 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 		(thisClient != k.thisClient) ||
 		(len(k.shardIDs) != len(shardIDs))
 
+	//k.logger.Debug("refreshShards - changed: ", changed)
 	if !changed {
 		for idx := range shardIDs {
 			if shardIDs[idx] != k.shardIDs[idx] {
@@ -199,20 +204,25 @@ func (k *Kinsumer) startConsumers() error {
 	k.stop = make(chan struct{})
 	assigned := false
 
+	k.logger.Debug("StartConsumers - thisClient / shardIDs: ", k.thisClient, len(k.shardIDs))
 	if k.thisClient >= len(k.shardIDs) {
 		return nil
 	}
 
+	k.logger.Debug("StartConsumers - creating shards: ", len(k.shardIDs))
 	for i, shard := range k.shardIDs {
 		if (i % k.totalClients) == k.thisClient {
 			k.waitGroup.Add(1)
 			assigned = true
+
+			k.logger.Debug("StartConsumers - beginning consumption for shard: ", shard)
 			go k.consume(shard)
 		}
 	}
 	if len(k.shardIDs) != 0 && !assigned {
 		return ErrNoShardsAssigned
 	}
+
 	return nil
 }
 
@@ -364,7 +374,11 @@ func (k *Kinsumer) Run() error {
 			// fail to deregister, so ignore error here.
 			err := deregisterFromClientsTable(k.dynamodb, k.clientID, k.clientsTableName)
 			if err != nil {
-				k.errors <- fmt.Errorf("error deregistering client: %s", err)
+				k.errors <- &ShardConsumerError{
+					Action: "deregisterFromClientsTable",
+					Error:  fmt.Errorf("error deregistering client: %s", err),
+					Level:  "WARNING",
+				}
 			}
 			if k.isLeader {
 				close(k.leaderLost)
@@ -387,7 +401,11 @@ func (k *Kinsumer) Run() error {
 
 		var record *ConsumedRecord
 		if err := k.startConsumers(); err != nil {
-			k.errors <- fmt.Errorf("error starting consumers: %s", err)
+			k.errors <- &ShardConsumerError{
+				Action: "startConsumers",
+				Error:  fmt.Errorf("error starting consumers: %s", err),
+				Level:  "CRITICAL",
+			}
 		}
 		defer k.stopConsumers()
 
@@ -415,21 +433,31 @@ func (k *Kinsumer) Run() error {
 				record.Checkpointer.Update(aws.StringValue(record.Record.SequenceNumber))
 				record = nil
 			case se := <-k.shardErrors:
-				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
+				k.errors <- &se //fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
 			case <-shardChangeTicker.C:
 				changed, err := k.refreshShards()
 				if err != nil {
-					k.errors <- fmt.Errorf("error refreshing shards: %s", err)
+					k.errors <- &ShardConsumerError{
+						Action: "refreshShards",
+						Error:  fmt.Errorf("error refreshing shards: %s", err),
+						Level:  "CRITICAL",
+					}
 				} else if changed {
+					k.logger.Debug("Refreshing Shards.... ")
 					shardChangeTicker.Stop()
 					k.stopConsumers()
 					record = nil
 					if err := k.startConsumers(); err != nil {
-						k.errors <- fmt.Errorf("error restarting consumers: %s", err)
+						k.errors <- &ShardConsumerError{
+							Action: "startConsumers",
+							Error:  fmt.Errorf("error restarting consumers: %s", err),
+							Level:  "CRITICAL",
+						}
 					}
 					// We create a new shardChangeTicker here so that the time it takes to stop and
 					// start the consumers is not included in the wait for the next tick.
 					shardChangeTicker = time.NewTicker(k.config.shardCheckFrequency)
+					k.logger.Debug("Successfully Refreshed Shards")
 				}
 			}
 		}
@@ -450,7 +478,7 @@ func (k *Kinsumer) Stop() {
 //
 // if err is non nil an error occurred in the system.
 // if err is nil and data is nil then kinsumer has been stopped
-func (k *Kinsumer) Next() (data *ConsumedRecord, err error) {
+func (k *Kinsumer) Next() (data *ConsumedRecord, err *ShardConsumerError) {
 	select {
 	case err = <-k.errors:
 		return nil, err

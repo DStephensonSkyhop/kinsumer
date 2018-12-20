@@ -45,22 +45,36 @@ func (k *Kinsumer) becomeLeader() {
 		defer k.leaderWG.Done()
 		leaderActions := time.NewTicker(k.config.leaderActionFrequency)
 		defer func() {
+			k.logger.Debug("Stopping Leader Actions.")
 			leaderActions.Stop()
 			err := k.deregisterLeadership()
 			if err != nil {
-				k.errors <- fmt.Errorf("error deregistering leadership: %v", err)
+				k.errors <- &ShardConsumerError{
+					Action: "deregisterLeadership",
+					Error:  fmt.Errorf("error deregistering leadership: %v", err),
+					Level:  "WARNING",
+				}
 			}
 		}()
 		ok, err := k.registerLeadership()
 		if err != nil {
-			k.errors <- fmt.Errorf("error registering initial leadership: %v", err)
+			k.errors <- &ShardConsumerError{
+				Action: "registerLeadership",
+				Error:  fmt.Errorf("error registering initial leadership: %v", err),
+				Level:  "WARNING",
+			}
 		}
 		// Perform leadership actions immediately if we became leader. If we didn't
 		// become leader yet, wait until the first tick to try again.
 		if ok {
+			k.logger.Debug("Performing First Leader Action.")
 			err = k.performLeaderActions()
 			if err != nil {
-				k.errors <- fmt.Errorf("error performing initial leader actions: %v", err)
+				k.errors <- &ShardConsumerError{
+					Action: "performLeaderActions",
+					Error:  fmt.Errorf("error performing initial leader actions: %v", err),
+					Level:  "WARNING",
+				}
 			}
 		}
 		for {
@@ -68,16 +82,25 @@ func (k *Kinsumer) becomeLeader() {
 			case <-leaderActions.C:
 				ok, err := k.registerLeadership()
 				if err != nil {
-					k.errors <- fmt.Errorf("Error registering leadership: %v", err)
+					k.errors <- &ShardConsumerError{
+						Action: "registerLeadership",
+						Error:  fmt.Errorf("Error registering leadership: %v", err),
+						Level:  "WARNING",
+					}
 				}
 				if !ok {
 					continue
 				}
 				err = k.performLeaderActions()
 				if err != nil {
-					k.errors <- fmt.Errorf("Error performing repeated leader actions: %v", err)
+					k.errors <- &ShardConsumerError{
+						Action: "performLeaderActions",
+						Error:  fmt.Errorf("Error performing repeated leader actions: %v", err),
+						Level:  "WARNING",
+					}
 				}
 			case <-k.leaderLost:
+				k.logger.Debug("Leader Lost.")
 				return
 			}
 		}
