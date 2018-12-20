@@ -3,6 +3,7 @@
 package kinsumer
 
 import (
+	"fmt"
 	"log"
 	"time"
 
@@ -30,11 +31,13 @@ const (
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
 func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string) (string, error) {
 	shardIteratorType := kinesis.ShardIteratorTypeAfterSequenceNumber
+	fmt.Printf("Get Shard Iterator, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
 	// from the horizon
 	ps := aws.String(sequenceNumber)
 	if sequenceNumber == "" {
+		fmt.Printf("No Sequence Number, starting from latest, Shard ID: %v\n", shardID)
 		shardIteratorType = kinesis.ShardIteratorTypeLatest
 		ps = nil
 	}
@@ -102,7 +105,7 @@ func (k *Kinsumer) captureShard(shardID string) (*checkpointer.Checkpointer, err
 // consume is a blocking call that captures then consumes the given shard in a loop.
 // It is also responsible for writing out the checkpoint updates to dynamo.
 // TODO: There are no tests for this file. Not sure how to even unit test this.
-func (k *Kinsumer) consume(shardID string, commitTicker chan bool) {
+func (k *Kinsumer) consume(shardID string) {
 	defer k.waitGroup.Done()
 
 	// capture the checkpointer
@@ -122,14 +125,16 @@ func (k *Kinsumer) consume(shardID string, commitTicker chan bool) {
 
 	// finished means we have reached the end of the shard but haven't necessarily processed/committed everything
 	finished := false
-	// Make sure we release the shard when we are done.
-	defer func() {
-		innerErr := checkpointer.Release()
-		if innerErr != nil {
-			k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Release", err: innerErr}
-			return
-		}
-	}()
+	/*
+		// Make sure we release the shard when we are done.
+		defer func() {
+			innerErr := checkpointer.Release()
+			if innerErr != nil {
+				k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Release", err: innerErr}
+				return
+			}
+		}()
+	*/
 
 	// Get the starting shard iterator
 	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber)
@@ -150,25 +155,13 @@ mainloop:
 		if iterator == "" && !finished {
 			checkpointer.Finish(lastSeqNum)
 			finished = true
+			return
 		}
 
 		// Handle async actions, and throttle requests to keep kinesis happy
 		select {
 		case <-k.stop:
 			return
-			/*
-				case <-commitTicker.C:
-					finishCommitted, err := checkpointer.Commit()
-					if err != nil {
-						k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
-						return
-					}
-					if finishCommitted {
-						return
-					}
-			*/
-			// Go back to waiting for a throttle/stop.
-			continue mainloop
 		case <-nextThrottle:
 		}
 
@@ -208,17 +201,6 @@ mainloop:
 				// Loop until we stop or the record is consumed, checkpointing if necessary.
 				for {
 					select {
-					/*
-						case <-commitTicker.C:
-							finishCommitted, err := checkpointer.Commit()
-							if err != nil {
-								k.shardErrors <- shardConsumerError{shardID: shardID, action: "checkpointer.Commit", err: err}
-								return
-							}
-							if finishCommitted {
-								return
-							}
-					*/
 					case <-k.stop:
 						return
 					case k.records <- &ConsumedRecord{

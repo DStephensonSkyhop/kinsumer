@@ -166,6 +166,7 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 	}
 
 	shardIDs, err = loadShardIDsFromDynamo(k.dynamodb, k.metadataTableName)
+	k.logger.Debug("StartConsumers - shardIDs: ", shardIDs)
 	if err != nil {
 		return false, err
 	}
@@ -195,37 +196,28 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 
 // startConsumers launches a shard consumer for each shard we should own
 // TODO: Can we unit test this at all?
-func (k *Kinsumer) startConsumers(commitTicker chan bool) error {
+func (k *Kinsumer) startConsumers() error {
 	k.stop = make(chan struct{})
 	assigned := false
 
+	k.logger.Debug("StartConsumers - thisClient / shardIDs: ", k.thisClient, len(k.shardIDs))
 	if k.thisClient >= len(k.shardIDs) {
 		return nil
 	}
 
-	var tickers []chan bool
-
+	k.logger.Debug("StartConsumers - creating shards: ", len(k.shardIDs))
 	for i, shard := range k.shardIDs {
 		if (i % k.totalClients) == k.thisClient {
 			k.waitGroup.Add(1)
 			assigned = true
-			ct := make(chan bool)
-			tickers = append(tickers, ct)
-			go k.consume(shard, ct)
+
+			k.logger.Debug("StartConsumers - beginning consumption for shard: ", shard)
+			go k.consume(shard)
 		}
 	}
 	if len(k.shardIDs) != 0 && !assigned {
 		return ErrNoShardsAssigned
 	}
-
-	go func() {
-		for {
-			<-commitTicker
-			for _, t := range tickers {
-				t <- true
-			}
-		}
-	}()
 
 	return nil
 }
@@ -344,7 +336,7 @@ func (k *Kinsumer) kinesisStreamReady() error {
 // This goroutine is responsible for startin/stopping consumers, aggregating all consumers' records,
 // updating Checkpointers as records are consumed, and refreshing our shard/client list and leadership
 //TODO: Can we unit test this at all?
-func (k *Kinsumer) Run(commitTicker chan bool) error {
+func (k *Kinsumer) Run() error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
 		return err
 	}
@@ -432,18 +424,20 @@ func (k *Kinsumer) Run(commitTicker chan bool) error {
 				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
 			case <-shardChangeTicker.C:
 				changed, err := k.refreshShards()
+				k.logger.Debug("Refreshing Shards.... changed: ", changed)
 				if err != nil {
 					k.errors <- fmt.Errorf("error refreshing shards: %s", err)
 				} else if changed {
 					shardChangeTicker.Stop()
 					k.stopConsumers()
 					record = nil
-					if err := k.startConsumers(commitTicker); err != nil {
+					if err := k.startConsumers(); err != nil {
 						k.errors <- fmt.Errorf("error restarting consumers: %s", err)
 					}
 					// We create a new shardChangeTicker here so that the time it takes to stop and
 					// start the consumers is not included in the wait for the next tick.
 					shardChangeTicker = time.NewTicker(k.config.shardCheckFrequency)
+					k.logger.Debug("Successfully Refreshed Shards")
 				}
 			}
 		}
