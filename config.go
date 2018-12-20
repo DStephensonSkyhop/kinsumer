@@ -49,8 +49,8 @@ func NewConfig() Config {
 	return Config{
 		throttleDelay:         250 * time.Millisecond,
 		commitFrequency:       1000 * time.Millisecond,
-		shardCheckFrequency:   30 * time.Second,
-		leaderActionFrequency: 30 * time.Second,
+		shardCheckFrequency:   5 * time.Second,
+		leaderActionFrequency: 60 * time.Second,
 		bufferSize:            100,
 		stats:                 &NoopStatReceiver{},
 		dynamoReadCapacity:    10,

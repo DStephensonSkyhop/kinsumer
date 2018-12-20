@@ -5,6 +5,7 @@ package kinsumer
 //TODO: The filename is bad
 
 import (
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -87,7 +88,10 @@ func deregisterFromClientsTable(db dynamodbiface.DynamoDBAPI, id, tableName stri
 // getClients returns a sorted list of all recently-updated clients in dynamo
 func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, maxAgeForClientRecord time.Duration) (clients []clientRecord, err error) {
 	filterExpression := "LastUpdate > :cutoff"
+	//uneditedcut := time.Now()
+	//cutoffdate := time.Now().Add(-maxAgeForClientRecord)
 	cutoff := strconv.FormatInt(time.Now().Add(-maxAgeForClientRecord).UnixNano(), 10)
+	//fmt.Printf("getClients - cutoff: %v\n", cutoffdate)
 
 	params := &dynamodb.ScanInput{
 		TableName:        aws.String(tableName),
@@ -97,13 +101,17 @@ func getClients(db dynamodbiface.DynamoDBAPI, name string, tableName string, max
 			":cutoff": {N: &cutoff},
 		},
 	}
-
 	var innerError error
 	err = db.ScanPages(params, func(p *dynamodb.ScanOutput, lastPage bool) (shouldContinue bool) {
 		for _, item := range p.Items {
 			var record clientRecord
 			innerError = dynamodbattribute.UnmarshalMap(item, &record)
+
+			//tm := time.Unix(0, record.LastUpdate)
+			//fmt.Printf("getClients - record: %v, updated: %v\n", record.ID, tm)
+
 			if innerError != nil {
+				fmt.Printf("getClients - dynamo unmarshal error: %v\n", innerError)
 				return false
 			}
 			clients = append(clients, record)
