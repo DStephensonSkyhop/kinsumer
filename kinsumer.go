@@ -15,12 +15,12 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	checkpointer "github.com/ericksonjoseph/kinsumer/checkpointer"
 	"golang.org/x/sync/errgroup"
 )
 
 type loggerInterface interface {
 	Debug(args ...interface{})
+	Debugf(s string, args ...interface{})
 }
 
 type ShardConsumerError struct {
@@ -31,9 +31,9 @@ type ShardConsumerError struct {
 }
 
 type ConsumedRecord struct {
-	Record       *kinesis.Record            // Record retrieved from kinesis
-	Checkpointer *checkpointer.Checkpointer // Object that will store the checkpoint back to the database
-	retrievedAt  time.Time                  // Time the record was retrieved from Kinesis
+	Record       *kinesis.Record // Record retrieved from kinesis
+	Checkpointer *Checkpointer   // Object that will store the checkpoint back to the database
+	retrievedAt  time.Time       // Time the record was retrieved from Kinesis
 }
 
 // Kinsumer is a Kinesis Consumer that tries to reduce duplicate reads while allowing for multiple

@@ -12,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	checkpointer "github.com/ericksonjoseph/kinsumer/checkpointer"
 )
 
 const (
@@ -73,18 +72,19 @@ func getRecords(k kinesisiface.KinesisAPI, iterator string) (records []*kinesis.
 }
 
 // captureShard blocks until we capture the given shardID
-func (k *Kinsumer) captureShard(shardID string) (*checkpointer.Checkpointer, error) {
+func (k *Kinsumer) captureShard(shardID string) (*Checkpointer, error) {
 	// Attempt to capture the shard in dynamo
 	for {
 		// Ask the checkpointer to capture the shard
-		checkpointer, err := checkpointer.Capture(
+		checkpointer, err := Capture(
 			shardID,
 			k.checkpointTableName,
 			k.dynamodb,
 			k.clientName,
 			k.clientID,
 			k.maxAgeForClientRecord,
-			k.config.stats)
+			k.config.stats,
+			k.logger)
 		if err != nil {
 			return nil, err
 		}

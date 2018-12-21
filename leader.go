@@ -15,7 +15,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	"github.com/ericksonjoseph/kinsumer/checkpointer"
 )
 
 const (
@@ -140,7 +139,7 @@ func (k *Kinsumer) performLeaderActions() error {
 		return fmt.Errorf("error loading shard IDs from kinesis: %v", err)
 	}
 
-	checkpoints, err := checkpointer.LoadCheckpoints(k.dynamodb, k.checkpointTableName)
+	checkpoints, err := LoadCheckpoints(k.dynamodb, k.checkpointTableName)
 	if err != nil {
 		return fmt.Errorf("error loading shard IDs from dynamo: %v", err)
 	}
@@ -189,7 +188,7 @@ func (k *Kinsumer) setCachedShardIDs(shardIDs []string) error {
 
 // diffShardIDs takes the current shard IDs and cached shards and returns the new sorted cache, ignoring
 // finished shards correctly.
-func diffShardIDs(curShardIDs, cachedShardIDs []string, checkpoints map[string]*checkpointer.CheckpointRecord) (updatedShardIDs []string, changed bool) {
+func diffShardIDs(curShardIDs, cachedShardIDs []string, checkpoints map[string]*CheckpointRecord) (updatedShardIDs []string, changed bool) {
 	// Look for differences, ignoring Finished shards.
 	cur := make(map[string]bool)
 	for _, s := range curShardIDs {
