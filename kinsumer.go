@@ -27,7 +27,7 @@ type ShardConsumerError struct {
 	ShardID string
 	Action  string
 	Error   error
-	Level   string // error levels consist of: WARNING, CRITICAL, FATAL
+	Level   uint32 // error levels consist of: WARNING, CRITICAL, FATAL
 }
 
 type ConsumedRecord struct {
@@ -377,7 +377,7 @@ func (k *Kinsumer) Run() error {
 				k.errors <- &ShardConsumerError{
 					Action: "deregisterFromClientsTable",
 					Error:  fmt.Errorf("error deregistering client: %s", err),
-					Level:  "WARNING",
+					Level:  WarnLevel,
 				}
 			}
 			if k.isLeader {
@@ -404,7 +404,7 @@ func (k *Kinsumer) Run() error {
 			k.errors <- &ShardConsumerError{
 				Action: "startConsumers",
 				Error:  fmt.Errorf("error starting consumers: %s", err),
-				Level:  "CRITICAL",
+				Level:  FatalLevel,
 			}
 		}
 		defer k.stopConsumers()
@@ -440,7 +440,7 @@ func (k *Kinsumer) Run() error {
 					k.errors <- &ShardConsumerError{
 						Action: "refreshShards",
 						Error:  fmt.Errorf("error refreshing shards: %s", err),
-						Level:  "CRITICAL",
+						Level:  FatalLevel,
 					}
 				} else if changed {
 					k.logger.Debug("Refreshing Shards.... ")
@@ -451,7 +451,7 @@ func (k *Kinsumer) Run() error {
 						k.errors <- &ShardConsumerError{
 							Action: "startConsumers",
 							Error:  fmt.Errorf("error restarting consumers: %s", err),
-							Level:  "CRITICAL",
+							Level:  FatalLevel,
 						}
 					}
 					// We create a new shardChangeTicker here so that the time it takes to stop and

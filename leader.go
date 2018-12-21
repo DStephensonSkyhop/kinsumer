@@ -52,7 +52,7 @@ func (k *Kinsumer) becomeLeader() {
 				k.errors <- &ShardConsumerError{
 					Action: "deregisterLeadership",
 					Error:  fmt.Errorf("error deregistering leadership: %v", err),
-					Level:  "WARNING",
+					Level:  WarnLevel,
 				}
 			}
 		}()
@@ -61,7 +61,7 @@ func (k *Kinsumer) becomeLeader() {
 			k.errors <- &ShardConsumerError{
 				Action: "registerLeadership",
 				Error:  fmt.Errorf("error registering initial leadership: %v", err),
-				Level:  "WARNING",
+				Level:  WarnLevel,
 			}
 		}
 		// Perform leadership actions immediately if we became leader. If we didn't
@@ -73,7 +73,7 @@ func (k *Kinsumer) becomeLeader() {
 				k.errors <- &ShardConsumerError{
 					Action: "performLeaderActions",
 					Error:  fmt.Errorf("error performing initial leader actions: %v", err),
-					Level:  "WARNING",
+					Level:  WarnLevel,
 				}
 			}
 		}
@@ -85,7 +85,7 @@ func (k *Kinsumer) becomeLeader() {
 					k.errors <- &ShardConsumerError{
 						Action: "registerLeadership",
 						Error:  fmt.Errorf("Error registering leadership: %v", err),
-						Level:  "WARNING",
+						Level:  WarnLevel,
 					}
 				}
 				if !ok {
@@ -96,7 +96,7 @@ func (k *Kinsumer) becomeLeader() {
 					k.errors <- &ShardConsumerError{
 						Action: "performLeaderActions",
 						Error:  fmt.Errorf("Error performing repeated leader actions: %v", err),
-						Level:  "WARNING",
+						Level:  WarnLevel,
 					}
 				}
 			case <-k.leaderLost:

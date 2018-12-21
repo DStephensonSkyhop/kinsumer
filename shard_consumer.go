@@ -5,7 +5,6 @@ package kinsumer
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -113,7 +112,7 @@ func (k *Kinsumer) consume(shardID string) {
 	// capture the checkpointer
 	checkpointer, err := k.captureShard(shardID)
 	if err != nil {
-		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "captureShard", Error: err, Level: "CRITICAL"}
+		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "captureShard", Error: err, Level: FatalLevel}
 		return
 	}
 
@@ -141,7 +140,7 @@ func (k *Kinsumer) consume(shardID string) {
 	// Get the starting shard iterator
 	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber)
 	if err != nil {
-		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getShardIterator", Error: err, Level: "CRITICAL"}
+		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getShardIterator", Error: err, Level: FatalLevel}
 		return
 	}
 
@@ -179,11 +178,15 @@ mainloop:
 
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
-				log.Printf("Got error: %s (%s) retry count is %d", awsErr.Message(), awsErr.OrigErr(), retryCount)
 				retryCount++
+				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: awsErr.Message(), Error: awsErr.OrigErr(), Level: WarnLevel}
+				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
+					Error: fmt.Errorf("Failed to get records... retrying (%v)", retryCount),
+					Level: WarnLevel,
+				}
 
 				if strings.Contains(awsErr.Message(), "Signature expired") == true {
-					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: "FATAL"}
+					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: PanicLevel}
 				}
 
 				// casting retryCount here to time.Duration purely for the multiplication, there is
@@ -191,7 +194,7 @@ mainloop:
 				time.Sleep(errorSleepDuration * time.Duration(retryCount))
 				continue mainloop
 			}
-			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: "WARNING"}
+			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: WarnLevel}
 		}
 		retryCount = 0
 
