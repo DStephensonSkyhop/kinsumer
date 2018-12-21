@@ -31,7 +31,6 @@ const (
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
 func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string) (string, error) {
 	shardIteratorType := kinesis.ShardIteratorTypeAfterSequenceNumber
-	fmt.Printf("Get Shard Iterator, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
 	// from the horizon
@@ -143,6 +142,7 @@ func (k *Kinsumer) consume(shardID string) {
 		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getShardIterator", Error: err, Level: FatalLevel}
 		return
 	}
+	k.logger.Debugf("getShardIterator, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
 
 	// no throttle on the first request.
 	nextThrottle := time.After(0)
