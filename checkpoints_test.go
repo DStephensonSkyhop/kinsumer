@@ -1,6 +1,6 @@
 // Copyright (c) 2016 Twitch Interactive.
 
-package checkpointer
+package kinsumer
 
 import (
 	"testing"

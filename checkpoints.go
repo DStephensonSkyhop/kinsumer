@@ -1,6 +1,6 @@
 // Copyright (c) 2016 Twitch Interactive
 
-package checkpointer
+package kinsumer
 
 import (
 	"fmt"
@@ -31,6 +31,7 @@ type Checkpointer struct {
 	mutex                 sync.Mutex
 	finished              bool
 	finalSequenceNumber   string
+	logger                loggerInterface
 }
 
 type CheckpointRecord struct {
@@ -56,7 +57,8 @@ func Capture(
 	ownerName string,
 	ownerID string,
 	maxAgeForClientRecord time.Duration,
-	stats statsd.StatReceiver) (*Checkpointer, error) {
+	stats statsd.StatReceiver,
+	log loggerInterface) (*Checkpointer, error) {
 
 	cutoff := time.Now().Add(-maxAgeForClientRecord).UnixNano()
 
@@ -135,6 +137,7 @@ func Capture(
 		sequenceNumber:        aws.StringValue(record.SequenceNumber),
 		maxAgeForClientRecord: maxAgeForClientRecord,
 		captured:              true,
+		logger:                log,
 	}
 
 	return checkpointer, nil
@@ -217,7 +220,7 @@ func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, e
 func (cp *Checkpointer) Release() error {
 	now := time.Now()
 
-	fmt.Printf("Attempting to release checkpointer for Shard with ID: %v\n", cp.shardID)
+	cp.logger.Debugf("Attempting to release checkpointer for Shard with ID: %v", cp.shardID)
 	attrVals, err := dynamodbattribute.MarshalMap(map[string]interface{}{
 		":ownerID":        aws.String(cp.ownerID),
 		":sequenceNumber": aws.String(cp.sequenceNumber),
@@ -247,12 +250,10 @@ func (cp *Checkpointer) Release() error {
 
 	cp.captured = false
 	if cp.finished == false {
-		fmt.Printf("Releasing unfinished checkpointe for Shard with ID: %v\n", cp.shardID)
-		//cp.finished = true
-		//cp.finalSequenceNumber = cp.sequenceNumber
+		cp.logger.Debugf("Releasing unfinished checkpointe for Shard with ID: %v", cp.shardID)
 	}
 
-	fmt.Printf("Successfully released checkpointer for Shard with ID: %v\n", cp.shardID)
+	cp.logger.Debugf("Successfully released checkpointer for Shard with ID: %v", cp.shardID)
 	return nil
 }
 
@@ -285,7 +286,6 @@ func (cp *Checkpointer) GetSequenceNumber() string {
 
 // LoadCheckpoints returns checkpoint records from dynamo mapped by shard id.
 func LoadCheckpoints(db dynamodbiface.DynamoDBAPI, tableName string) (map[string]*CheckpointRecord, error) {
-	fmt.Printf("LoadCheckpoints - Loading Checkpoints from: %v\n", tableName)
 	params := &dynamodb.ScanInput{
 		TableName:      aws.String(tableName),
 		ConsistentRead: aws.Bool(true),
@@ -318,7 +318,6 @@ func LoadCheckpoints(db dynamodbiface.DynamoDBAPI, tableName string) (map[string
 	for _, checkpoint := range records {
 		checkpointMap[checkpoint.Shard] = checkpoint
 	}
-	fmt.Printf("LoadCheckpoints - Found Checkpoints: %v\n", checkpointMap)
 	return checkpointMap, nil
 }
 

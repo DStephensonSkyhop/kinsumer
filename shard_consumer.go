@@ -5,7 +5,6 @@ package kinsumer
 import (
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	checkpointer "github.com/ericksonjoseph/kinsumer/checkpointer"
 )
 
 const (
@@ -33,7 +31,6 @@ const (
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
 func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string) (string, error) {
 	shardIteratorType := kinesis.ShardIteratorTypeAfterSequenceNumber
-	fmt.Printf("Get Shard Iterator, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
 	// from the horizon
@@ -74,18 +71,19 @@ func getRecords(k kinesisiface.KinesisAPI, iterator string) (records []*kinesis.
 }
 
 // captureShard blocks until we capture the given shardID
-func (k *Kinsumer) captureShard(shardID string) (*checkpointer.Checkpointer, error) {
+func (k *Kinsumer) captureShard(shardID string) (*Checkpointer, error) {
 	// Attempt to capture the shard in dynamo
 	for {
 		// Ask the checkpointer to capture the shard
-		checkpointer, err := checkpointer.Capture(
+		checkpointer, err := Capture(
 			shardID,
 			k.checkpointTableName,
 			k.dynamodb,
 			k.clientName,
 			k.clientID,
 			k.maxAgeForClientRecord,
-			k.config.stats)
+			k.config.stats,
+			k.logger)
 		if err != nil {
 			return nil, err
 		}
@@ -113,7 +111,7 @@ func (k *Kinsumer) consume(shardID string) {
 	// capture the checkpointer
 	checkpointer, err := k.captureShard(shardID)
 	if err != nil {
-		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "captureShard", Error: err, Level: "CRITICAL"}
+		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "captureShard", Error: err, Level: FatalLevel}
 		return
 	}
 
@@ -141,9 +139,10 @@ func (k *Kinsumer) consume(shardID string) {
 	// Get the starting shard iterator
 	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber)
 	if err != nil {
-		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getShardIterator", Error: err, Level: "CRITICAL"}
+		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getShardIterator", Error: err, Level: FatalLevel}
 		return
 	}
+	k.logger.Debugf("getShardIterator, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
 
 	// no throttle on the first request.
 	nextThrottle := time.After(0)
@@ -179,11 +178,15 @@ mainloop:
 
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
-				log.Printf("Got error: %s (%s) retry count is %d", awsErr.Message(), awsErr.OrigErr(), retryCount)
 				retryCount++
+				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: awsErr.Message(), Error: awsErr.OrigErr(), Level: WarnLevel}
+				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
+					Error: fmt.Errorf("Failed to get records... retrying (%v)", retryCount),
+					Level: WarnLevel,
+				}
 
 				if strings.Contains(awsErr.Message(), "Signature expired") == true {
-					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: "FATAL"}
+					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: PanicLevel}
 				}
 
 				// casting retryCount here to time.Duration purely for the multiplication, there is
@@ -191,7 +194,7 @@ mainloop:
 				time.Sleep(errorSleepDuration * time.Duration(retryCount))
 				continue mainloop
 			}
-			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: "WARNING"}
+			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: WarnLevel}
 		}
 		retryCount = 0
 

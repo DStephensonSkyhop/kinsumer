@@ -15,25 +15,25 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	checkpointer "github.com/ericksonjoseph/kinsumer/checkpointer"
 	"golang.org/x/sync/errgroup"
 )
 
 type loggerInterface interface {
 	Debug(args ...interface{})
+	Debugf(s string, args ...interface{})
 }
 
 type ShardConsumerError struct {
 	ShardID string
 	Action  string
 	Error   error
-	Level   string // error levels consist of: WARNING, CRITICAL, FATAL
+	Level   uint32 // error levels consist of: WARNING, CRITICAL, FATAL
 }
 
 type ConsumedRecord struct {
-	Record       *kinesis.Record            // Record retrieved from kinesis
-	Checkpointer *checkpointer.Checkpointer // Object that will store the checkpoint back to the database
-	retrievedAt  time.Time                  // Time the record was retrieved from Kinesis
+	Record       *kinesis.Record // Record retrieved from kinesis
+	Checkpointer *Checkpointer   // Object that will store the checkpoint back to the database
+	retrievedAt  time.Time       // Time the record was retrieved from Kinesis
 }
 
 // Kinsumer is a Kinesis Consumer that tries to reduce duplicate reads while allowing for multiple
@@ -377,7 +377,7 @@ func (k *Kinsumer) Run() error {
 				k.errors <- &ShardConsumerError{
 					Action: "deregisterFromClientsTable",
 					Error:  fmt.Errorf("error deregistering client: %s", err),
-					Level:  "WARNING",
+					Level:  WarnLevel,
 				}
 			}
 			if k.isLeader {
@@ -404,7 +404,7 @@ func (k *Kinsumer) Run() error {
 			k.errors <- &ShardConsumerError{
 				Action: "startConsumers",
 				Error:  fmt.Errorf("error starting consumers: %s", err),
-				Level:  "CRITICAL",
+				Level:  FatalLevel,
 			}
 		}
 		defer k.stopConsumers()
@@ -440,7 +440,7 @@ func (k *Kinsumer) Run() error {
 					k.errors <- &ShardConsumerError{
 						Action: "refreshShards",
 						Error:  fmt.Errorf("error refreshing shards: %s", err),
-						Level:  "CRITICAL",
+						Level:  FatalLevel,
 					}
 				} else if changed {
 					k.logger.Debug("Refreshing Shards.... ")
@@ -451,7 +451,7 @@ func (k *Kinsumer) Run() error {
 						k.errors <- &ShardConsumerError{
 							Action: "startConsumers",
 							Error:  fmt.Errorf("error restarting consumers: %s", err),
-							Level:  "CRITICAL",
+							Level:  FatalLevel,
 						}
 					}
 					// We create a new shardChangeTicker here so that the time it takes to stop and
