@@ -179,19 +179,20 @@ mainloop:
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
 				retryCount++
-				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: awsErr.Message(), Error: awsErr.OrigErr(), Level: WarnLevel}
+				k.logger.Debugf("Failed to get records, AWS error: %v, %v", awsErr.Message(), awsErr.OrigErr())
+
 				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
 					Error: fmt.Errorf("Failed to get records... retrying (%v/%v)", retryCount, k.config.shardRetryLimit),
 					Level: ErrorLevel,
 				}
 
+				// Critical AWS error
 				if strings.Contains(awsErr.Message(), "Signature expired") == true {
 					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: PanicLevel}
 				}
 
 				// Close shard if maximum number of retries is exceeded.
 				if retryCount >= k.config.shardRetryLimit {
-					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: fmt.Errorf("Failed to get records, retry limit exceeded, closing shard."), Level: FatalLevel}
 					return
 				}
 
