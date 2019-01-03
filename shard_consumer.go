@@ -182,7 +182,7 @@ mainloop:
 				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: awsErr.Message(), Error: awsErr.OrigErr(), Level: WarnLevel}
 				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
 					Error: fmt.Errorf("Failed to get records... retrying (%v)", retryCount),
-					Level: WarnLevel,
+					Level: ErrorLevel,
 				}
 
 				if strings.Contains(awsErr.Message(), "Signature expired") == true {
@@ -194,7 +194,7 @@ mainloop:
 				time.Sleep(errorSleepDuration * time.Duration(retryCount))
 				continue mainloop
 			}
-			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: WarnLevel}
+			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: ErrorLevel}
 		}
 		retryCount = 0
 
