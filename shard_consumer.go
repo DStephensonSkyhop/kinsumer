@@ -177,32 +177,34 @@ mainloop:
 		records, next, lag, err := getRecords(k.kinesis, iterator)
 
 		if err != nil {
-			if awsErr, ok := err.(awserr.Error); ok {
-				retryCount++
-				k.logger.Debugf("Failed to get records, AWS error: %v, %v", awsErr.Message(), awsErr.OrigErr())
+			retryCount++
+			k.logger.Debugf("Failed to get records... retrying (%v/%v)", retryCount, k.config.shardRetryLimit)
 
-				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
-					Error: fmt.Errorf("Failed to get records... retrying (%v/%v)", retryCount, k.config.shardRetryLimit),
-					Level: ErrorLevel,
-				}
+			if awsErr, ok := err.(awserr.Error); ok {
+				k.logger.Debugf("Failed to get records, AWS error: %v, %v", awsErr.Message(), awsErr.OrigErr())
 
 				// Critical AWS error
 				if strings.Contains(awsErr.Message(), "Signature expired") == true {
-					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: PanicLevel}
-				}
-
-				// Close shard if maximum number of retries is exceeded.
-				if retryCount >= k.config.shardRetryLimit {
+					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: FatalLevel}
 					return
 				}
-
-				// casting retryCount here to time.Duration purely for the multiplication, there is
-				// no meaning to retryCount nanoseconds
-				time.Sleep(errorSleepDuration * time.Duration(retryCount))
-				continue mainloop
-			} else {
-				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: ErrorLevel}
 			}
+
+			// Close shard if maximum number of retries is exceeded.
+			// If we can't get records from this shard, we will close the entire app, instead of this single shard
+			// because the checkpointer would need to be released, and the responsibility for that was moved to the application.
+			if retryCount >= k.config.shardRetryLimit {
+				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
+					Error: fmt.Errorf("Failed to get records, retry limit exceeded (%v/%v)", retryCount, k.config.shardRetryLimit),
+					Level: FatalLevel,
+				}
+				return
+			}
+
+			// casting retryCount here to time.Duration purely for the multiplication, there is
+			// no meaning to retryCount nanoseconds
+			time.Sleep(errorSleepDuration * time.Duration(retryCount))
+			continue mainloop
 		}
 		retryCount = 0
 
