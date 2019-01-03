@@ -42,6 +42,9 @@ type Config struct {
 	dynamoWriteCapacity int64
 	// Time to wait between attempts to verify tables were created/deleted completely
 	dynamoWaiterDelay time.Duration
+
+	// Maximum number of retries before closing a shard
+	shardRetryLimit int
 }
 
 // NewConfig returns a default Config struct
@@ -56,6 +59,7 @@ func NewConfig() Config {
 		dynamoReadCapacity:    10,
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
+		shardRetryLimit:       10,
 	}
 }
 
@@ -110,6 +114,11 @@ func (c Config) WithDynamoWriteCapacity(writeCapacity int64) Config {
 // WithDynamoWaiterDelay returns a Config with a modified dynamo waiter delay
 func (c Config) WithDynamoWaiterDelay(delay time.Duration) Config {
 	c.dynamoWaiterDelay = delay
+	return c
+}
+
+func (c Config) WithShardRetryLimit(limit int) Config {
+	c.shardRetryLimit = limit
 	return c
 }
 

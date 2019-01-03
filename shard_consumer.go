@@ -181,7 +181,7 @@ mainloop:
 				retryCount++
 				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: awsErr.Message(), Error: awsErr.OrigErr(), Level: WarnLevel}
 				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords",
-					Error: fmt.Errorf("Failed to get records... retrying (%v)", retryCount),
+					Error: fmt.Errorf("Failed to get records... retrying (%v/%v)", retryCount, k.config.shardRetryLimit),
 					Level: ErrorLevel,
 				}
 
@@ -189,12 +189,19 @@ mainloop:
 					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: errors.New("Signature Expired"), Level: PanicLevel}
 				}
 
+				// Close shard if maximum number of retries is exceeded.
+				if retryCount >= k.config.shardRetryLimit {
+					k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: fmt.Errorf("Failed to get records, retry limit exceeded, closing shard."), Level: FatalLevel}
+					return
+				}
+
 				// casting retryCount here to time.Duration purely for the multiplication, there is
 				// no meaning to retryCount nanoseconds
 				time.Sleep(errorSleepDuration * time.Duration(retryCount))
 				continue mainloop
+			} else {
+				k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: ErrorLevel}
 			}
-			k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getRecords", Error: err, Level: ErrorLevel}
 		}
 		retryCount = 0
 
