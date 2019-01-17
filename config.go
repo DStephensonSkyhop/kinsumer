@@ -28,6 +28,10 @@ type Config struct {
 	// Time between leader actions
 	leaderActionFrequency time.Duration
 
+	// shard starting point
+	// LATEST, TRIM_HORIZON
+	shardIteratorType string
+
 	// ---------- [ For the entire Kinsumer ] ----------
 	// Size of the buffer for the combined records channel. When the channel fills up
 	// the workers will stop adding new elements to the queue, so a slow client will
@@ -119,6 +123,11 @@ func (c Config) WithDynamoWaiterDelay(delay time.Duration) Config {
 
 func (c Config) WithShardRetryLimit(limit int) Config {
 	c.shardRetryLimit = limit
+	return c
+}
+
+func (c Config) WithShardIteratorType(iterator string) Config {
+	c.shardIteratorType = iterator
 	return c
 }
 

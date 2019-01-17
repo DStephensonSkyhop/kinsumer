@@ -29,7 +29,7 @@ const (
 )
 
 // getShardIterator gets a shard iterator after the last sequence number we read or at the start of the stream
-func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string) (string, error) {
+func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID string, sequenceNumber string, iteratorType string) (string, error) {
 	shardIteratorType := kinesis.ShardIteratorTypeAfterSequenceNumber
 
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
@@ -37,7 +37,7 @@ func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID stri
 	ps := aws.String(sequenceNumber)
 	if sequenceNumber == "" {
 		fmt.Printf("No Sequence Number, starting from latest, Shard ID: %v\n", shardID)
-		shardIteratorType = kinesis.ShardIteratorTypeLatest
+		shardIteratorType = iteratorType
 		ps = nil
 	}
 
@@ -137,7 +137,7 @@ func (k *Kinsumer) consume(shardID string) {
 	*/
 
 	// Get the starting shard iterator
-	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber)
+	iterator, err := getShardIterator(k.kinesis, k.streamName, shardID, sequenceNumber, k.config.shardIteratorType)
 	if err != nil {
 		k.shardErrors <- ShardConsumerError{ShardID: shardID, Action: "getShardIterator", Error: err, Level: FatalLevel}
 		return
