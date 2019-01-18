@@ -340,7 +340,8 @@ func (k *Kinsumer) kinesisStreamReady() error {
 // This goroutine is responsible for startin/stopping consumers, aggregating all consumers' records,
 // updating Checkpointers as records are consumed, and refreshing our shard/client list and leadership
 //TODO: Can we unit test this at all?
-func (k *Kinsumer) Run() error {
+// funcRefresh - function pointer that will be called anytime the shards are being refreshed.
+func (k *Kinsumer) Run(funcRefresh func()) error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
 		return err
 	}
@@ -444,6 +445,11 @@ func (k *Kinsumer) Run() error {
 					}
 				} else if changed {
 					k.logger.Debug("Refreshing Shards.... ")
+
+					// Notify directly to any consumers that the shards are being refreshed.
+					// To avoid any errors when dealing with shard size changes, this needs to be instant.
+					funcRefresh()
+
 					shardChangeTicker.Stop()
 					k.stopConsumers()
 					record = nil
