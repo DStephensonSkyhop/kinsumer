@@ -341,7 +341,7 @@ func (k *Kinsumer) kinesisStreamReady() error {
 // updating Checkpointers as records are consumed, and refreshing our shard/client list and leadership
 //TODO: Can we unit test this at all?
 // funcRefresh - function pointer that will be called anytime the shards are being refreshed.
-func (k *Kinsumer) Run(funcRefresh func()) error {
+func (k *Kinsumer) Run() error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
 		return err
 	}
@@ -446,10 +446,6 @@ func (k *Kinsumer) Run(funcRefresh func()) error {
 				} else if changed {
 					k.logger.Debug("Refreshing Shards.... ")
 
-					// Notify directly to any consumers that the shards are being refreshed.
-					// To avoid any errors when dealing with shard size changes, this needs to be instant.
-					funcRefresh()
-
 					shardChangeTicker.Stop()
 					k.stopConsumers()
 					record = nil
@@ -460,6 +456,16 @@ func (k *Kinsumer) Run(funcRefresh func()) error {
 							Level:  FatalLevel,
 						}
 					}
+
+					// Notify directly to any consumers that the shards are being refreshed.
+					// To avoid any errors when dealing with shard size changes, this needs to be instant.
+					k.errors <- &ShardConsumerError{
+						Action: "refreshShards",
+						Error:  fmt.Errorf("Successfully Refreshed Shards"),
+						Level:  InfoLevel,
+					}
+
+					//oneTimeChange = false
 					// We create a new shardChangeTicker here so that the time it takes to stop and
 					// start the consumers is not included in the wait for the next tick.
 					shardChangeTicker = time.NewTicker(k.config.shardCheckFrequency)

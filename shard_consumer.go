@@ -35,7 +35,7 @@ func getShardIterator(k kinesisiface.KinesisAPI, streamName string, shardID stri
 	// If we do not have a sequenceNumber yet we need to get a shardIterator
 	// from the horizon
 	ps := aws.String(sequenceNumber)
-	if sequenceNumber == "" {
+	if sequenceNumber == "" || iteratorType == kinesis.ShardIteratorTypeLatest {
 		fmt.Printf("No Sequence Number, starting from latest, Shard ID: %v\n", shardID)
 		shardIteratorType = iteratorType
 		ps = nil
