@@ -496,7 +496,7 @@ func (k *Kinsumer) Next() (data *ConsumedRecord, err *ShardConsumerError) {
 		return nil, err
 	case record, ok := <-k.output:
 		if ok {
-			k.config.stats.EventToClient(*record.Record.ApproximateArrivalTimestamp, record.retrievedAt)
+			k.config.stats.EventToClient(*record.Record.ApproximateArrivalTimestamp, record.retrievedAt, len(record.Record.Data))
 			data = record
 		}
 	}

@@ -39,10 +39,11 @@ func (s *Statsd) Checkpoint() {
 
 // EventToClient implementation that writes to statsd metrics about a record
 // that was consumed by the client
-func (s *Statsd) EventToClient(inserted, retrieved time.Time) {
+func (s *Statsd) EventToClient(inserted, retrieved time.Time, size int) {
 	now := time.Now()
 
 	_ = s.client.Inc("kinsumer.consumed", 1, 1.0)
+	_ = s.client.Inc("kinsumer.bytes", int64(size), 1.0)
 	_ = s.client.TimingDuration("kinsumer.in_stream", retrieved.Sub(inserted), 1.0)
 	_ = s.client.TimingDuration("kinsumer.end_to_end", now.Sub(inserted), 1.0)
 	_ = s.client.TimingDuration("kinsumer.in_kinsumer", now.Sub(retrieved), 1.0)
