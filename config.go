@@ -49,6 +49,12 @@ type Config struct {
 
 	// Maximum number of retries before closing a shard
 	shardRetryLimit int
+
+	// This feature enables consumers to receive records from a stream with throughput
+	// of up to 2 MB of data per second per shard. This throughput is dedicated,
+	// which means that consumers that use enhanced fan-out don't have to contend
+	// with other consumers that are receiving data from the stream.
+	enhancedFanOutMode bool
 }
 
 // NewConfig returns a default Config struct
@@ -121,13 +127,21 @@ func (c Config) WithDynamoWaiterDelay(delay time.Duration) Config {
 	return c
 }
 
+// WithShardRetryLimit
 func (c Config) WithShardRetryLimit(limit int) Config {
 	c.shardRetryLimit = limit
 	return c
 }
 
+// WithShardIteratorType
 func (c Config) WithShardIteratorType(iterator string) Config {
 	c.shardIteratorType = iterator
+	return c
+}
+
+// WithEnhancedFanOutMode
+func (c Config) WithEnhancedFanOutMode(enabled bool) Config {
+	c.enhancedFanOutMode = enabled
 	return c
 }
 
