@@ -55,6 +55,12 @@ type Config struct {
 	// which means that consumers that use enhanced fan-out don't have to contend
 	// with other consumers that are receiving data from the stream.
 	enhancedFanOutMode bool
+
+	// Amount of time to wait after registering this consumer as an enhanced fan-out consumer.
+	// You may wonder why not call ListStreamConsumer in a loop until the state is ACTIVE.
+	// We avoid those calls because AWS puts a hard limit of 5 req/second per stream on that
+	// endpoint which will be easy to breach if you have multiple consumers.
+	enhancedFanOutSleep time.Duration
 }
 
 // NewConfig returns a default Config struct
@@ -70,6 +76,8 @@ func NewConfig() Config {
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
 		shardRetryLimit:       10,
+		enhancedFanOutMode:    false,
+		enhancedFanOutSleep:   10 * time.Second,
 	}
 }
 
@@ -145,6 +153,12 @@ func (c Config) WithEnhancedFanOutMode(enabled bool) Config {
 	return c
 }
 
+// WithEnhancedFanOutSleep
+func (c Config) WithEnhancedFanOutSleep(duration time.Duration) Config {
+	c.enhancedFanOutSleep = duration
+	return c
+}
+
 // Verify that a config struct has sane and valid values
 func validateConfig(c *Config) error {
 	if c.throttleDelay < 200*time.Millisecond {
@@ -177,6 +191,12 @@ func validateConfig(c *Config) error {
 
 	if c.dynamoReadCapacity == 0 || c.dynamoWriteCapacity == 0 {
 		return ErrConfigInvalidDynamoCapacity
+	}
+
+	// If you are using enhanced fan-out mode, you should sleep for at least
+	// 1 seconds after registering this consumer.
+	if c.enhancedFanOutMode && c.enhancedFanOutSleep/time.Second < 1 {
+		return ErrConfigInvalidEnhancedFanOutSleep
 	}
 
 	return nil

@@ -67,6 +67,8 @@ var (
 	ErrConfigInvalidStats = errors.New("Stats cannot be nil")
 	// ErrConfigInvalidDynamoCapacity - Dynamo read/write capacity cannot be 0
 	ErrConfigInvalidDynamoCapacity = errors.New("Dynamo read/write capacity cannot be 0")
+	// ErrConfigInvalidEnhancedFanOutSleep - Enhanced fan-out consumer sleep cannot be less that one second
+	ErrConfigInvalidEnhancedFanOutSleep = errors.New("Enhanced fan-out consumer sleep cannot be less that 1 second")
 
 	// ErrKinesisCantDescribeStream - Unable to describe stream
 	ErrKinesisCantDescribeStream = errors.New("Unable to describe stream")

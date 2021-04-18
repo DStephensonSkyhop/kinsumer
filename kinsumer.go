@@ -47,6 +47,7 @@ type Kinsumer struct {
 	dynamodb              dynamodbiface.DynamoDBAPI // interface to the dynamodb service
 	streamName            string                    // name of the kinesis stream to consume from
 	enhancedFanOutMode    bool                      // Whether this client runs as an enhanced fan-out consumer events are pushed
+	enhancedFanOutSleep   time.Duration             // Number of seconds it takes a newly registered enhanced fan-out consumer to become ACTIVE
 	streamARN             string                    // ARN of the kinesis stream to consume from when using enhanced fan-out
 	shardIDs              []string                  // all the shards in the stream, for detecting when the shards change
 	stop                  chan struct{}             // channel used to signal to all the go routines that we want to stop consuming
@@ -130,6 +131,7 @@ func NewWithInterfaces(logger loggerInterface, kinesisi kinesisiface.KinesisAPI,
 		dynamodb:              dynamodb,
 		streamName:            streamName,
 		enhancedFanOutMode:    config.enhancedFanOutMode,
+		enhancedFanOutSleep:   config.enhancedFanOutSleep,
 		streamARN:             streamARN,
 		stoprequest:           make(chan bool),
 		records:               make(chan *ConsumedRecord, config.bufferSize),
@@ -424,7 +426,7 @@ func (k *Kinsumer) Run() error {
 		// to make sure its complete but AWS puts a hard limit of 5 req/second per stream on that
 		// endpoint which makes it difficult for us to use it with multiple consumers :/
 		k.logger.Debug("Sleeping to give the newly registered stream consumer time become ACTIVE")
-		time.Sleep(10 * time.Second)
+		time.Sleep(k.enhancedFanOutSleep)
 	}
 
 	k.mainWG.Add(1)
