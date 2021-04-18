@@ -434,11 +434,7 @@ func (k *Kinsumer) Run() error {
 					Level:  WarnLevel,
 				}
 			}
-			if k.isLeader {
-				close(k.leaderLost)
-				k.leaderLost = nil
-				k.isLeader = false
-			}
+			k.unbecomeLeader()
 			// Do this outside the k.isLeader check in case k.isLeader was false because
 			// we lost leadership but haven't had time to shutdown the goroutine yet.
 			k.leaderWG.Wait()
