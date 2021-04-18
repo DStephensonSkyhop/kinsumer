@@ -285,8 +285,8 @@ func (k *Kinsumer) dynamoTableActive(name string) error {
 		return fmt.Errorf("error describing table %s: %v", name, err)
 	}
 	status := aws.StringValue(out.Table.TableStatus)
-	if status != "ACTIVE" {
-		return fmt.Errorf("table %s exists but state '%s' is not 'ACTIVE'", name, status)
+	if status != "ACTIVE" && status != "UPDATING" {
+		return fmt.Errorf("table %s exists but state '%s' is not 'ACTIVE' or 'UPDATING'", name, status)
 	}
 	return nil
 }
