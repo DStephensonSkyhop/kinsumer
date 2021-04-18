@@ -188,11 +188,20 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 	}
 
 	shardIDs, err = loadShardIDsFromDynamo(k.dynamodb, k.metadataTableName)
-	//k.logger.Debug("refreshShards - loaded shardIDs: ", shardIDs)
-	//k.logger.Debug("refreshShards - current shardIDs: ", k.shardIDs)
 	if err != nil {
 		k.logger.Debug("refreshShards - load shard IDs error: ", err)
 		return false, err
+	}
+
+	if len(shardIDs) == 0 {
+		shardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
+		if err != nil {
+			return false, err
+		}
+		sErr := k.setCachedShardIDs(shardIDs)
+		if sErr != nil {
+			return false, sErr
+		}
 	}
 
 	changed := (totalClients != k.totalClients) ||
