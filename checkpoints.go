@@ -30,7 +30,6 @@ type Checkpointer struct {
 	dirty                 bool
 	mutex                 sync.Mutex
 	finished              bool
-	finalSequenceNumber   string
 	logger                loggerInterface
 }
 
@@ -175,7 +174,7 @@ func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, e
 		LastUpdateRFC:  now.UTC().Format(time.RFC1123Z),
 	}
 	finished := false
-	if cp.finished && (cp.sequenceNumber == cp.finalSequenceNumber || cp.finalSequenceNumber == "") {
+	if cp.finished {
 		record.Finished = aws.Int64(now.UnixNano())
 		record.FinishedRFC = aws.String(now.UTC().Format(time.RFC1123Z))
 		finished = true
@@ -218,6 +217,8 @@ func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, e
 
 // Release releases our ownership of the checkpoint in dynamo so another client can take it
 func (cp *Checkpointer) Release() error {
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
 	now := time.Now()
 
 	cp.logger.Debugf("Attempting to release checkpointer for Shard with ID: %v", cp.shardID)
@@ -250,7 +251,7 @@ func (cp *Checkpointer) Release() error {
 
 	cp.captured = false
 	if cp.finished == false {
-		cp.logger.Debugf("Releasing unfinished checkpointe for Shard with ID: %v", cp.shardID)
+		cp.logger.Debugf("Releasing unfinished checkpoint for Shard with ID: %v", cp.shardID)
 	}
 
 	cp.logger.Debugf("Successfully released checkpointer for Shard with ID: %v", cp.shardID)
@@ -266,21 +267,20 @@ func (cp *Checkpointer) Update(sequenceNumber string) {
 }
 
 // Finish marks the given sequence number as the final one for the shard.
-// sequenceNumber is the empty string if we never read anything from the shard.
-func (cp *Checkpointer) Finish(sequenceNumber string) {
+func (cp *Checkpointer) Finish() {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
-	cp.finalSequenceNumber = sequenceNumber
 	cp.finished = true
 }
 
 func (cp *Checkpointer) GetShardID() string {
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
 	return cp.shardID
 }
 func (cp *Checkpointer) GetSequenceNumber() string {
-	if cp.finished {
-		return cp.finalSequenceNumber
-	}
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
 	return cp.sequenceNumber
 }
 

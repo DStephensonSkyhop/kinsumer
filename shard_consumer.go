@@ -178,12 +178,11 @@ func (k *Kinsumer) consume(shardID string) {
 
 	retryCount := 0
 
-	var lastSeqNum string
 mainloop:
 	for {
 		// We have reached the end of the shard's data. Set Finished in dynamo and stop processing.
 		if iterator == "" && !finished {
-			checkpointer.Finish(lastSeqNum)
+			checkpointer.Finish()
 			finished = true
 			return
 		}
@@ -257,9 +256,6 @@ mainloop:
 					}
 				}
 			}
-
-			// Update the last sequence number we saw, in case we reached the end of the stream.
-			lastSeqNum = aws.StringValue(records[len(records)-1].SequenceNumber)
 		}
 		iterator = next
 	}
