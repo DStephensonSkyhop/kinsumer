@@ -158,7 +158,7 @@ func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, e
 	if !cp.captured {
 		// Another thread may have decided to release this checkpointer
 		// because it realized it was at the end of the stream
-		cp.logger.Warnf("Attempted to commit a checkpointer that has already been released: %s", cp.shardID)
+		cp.logger.Debugf("Attempted to commit a checkpointer that has already been released: %s", cp.shardID)
 		return true, nil
 	}
 	if !cp.dirty && !cp.finished {
@@ -228,7 +228,7 @@ func (cp *Checkpointer) Release() error {
 	if !cp.captured {
 		// Another thread may have decided to release this checkpointer
 		// because it realized it was at the end of the stream
-		cp.logger.Warnf("Attempted to release a checkpointer that has already been released: %s", cp.shardID)
+		cp.logger.Debugf("Attempted to release a checkpointer that has already been released: %s", cp.shardID)
 		return nil
 	}
 	now := time.Now()
