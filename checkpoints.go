@@ -155,6 +155,12 @@ func (cp *Checkpointer) Commit() (bool, error) {
 func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, error) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
+	if !cp.captured {
+		// Another thread may have decided to release this checkpointer
+		// because it realized it was at the end of the stream
+		cp.logger.Warnf("Attempted to commit a checkpointer that has already been released: %s", cp.shardID)
+		return true, nil
+	}
 	if !cp.dirty && !cp.finished {
 		return false, nil
 	}
@@ -219,6 +225,12 @@ func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, e
 func (cp *Checkpointer) Release() error {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
+	if !cp.captured {
+		// Another thread may have decided to release this checkpointer
+		// because it realized it was at the end of the stream
+		cp.logger.Warnf("Attempted to release a checkpointer that has already been released: %s", cp.shardID)
+		return nil
+	}
 	now := time.Now()
 
 	cp.logger.Debugf("Attempting to release checkpointer for Shard with ID: %v", cp.shardID)
@@ -323,7 +335,6 @@ func LoadCheckpoints(db dynamodbiface.DynamoDBAPI, tableName string) (map[string
 
 // dynamoTableActive returns an error if the given table is not ACTIVE
 func (cp *Checkpointer) dynamoTableActive() error {
-
 	out, err := cp.dynamodb.DescribeTable(&dynamodb.DescribeTableInput{
 		TableName: aws.String(cp.tableName),
 	})

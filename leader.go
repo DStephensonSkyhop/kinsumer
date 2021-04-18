@@ -4,7 +4,6 @@ package kinsumer
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"time"
 
@@ -48,7 +47,7 @@ func (k *Kinsumer) becomeLeader() {
 			leaderActions.Stop()
 			err := k.deregisterLeadership()
 			if err != nil {
-				k.errors <- &ShardConsumerError{
+				k.errors <- &ShardConsumerSignal{
 					Action: "deregisterLeadership",
 					Error:  fmt.Errorf("error deregistering leadership: %v", err),
 					Level:  WarnLevel,
@@ -57,7 +56,7 @@ func (k *Kinsumer) becomeLeader() {
 		}()
 		ok, err := k.registerLeadership()
 		if err != nil {
-			k.errors <- &ShardConsumerError{
+			k.errors <- &ShardConsumerSignal{
 				Action: "registerLeadership",
 				Error:  fmt.Errorf("error registering initial leadership: %v", err),
 				Level:  WarnLevel,
@@ -69,7 +68,7 @@ func (k *Kinsumer) becomeLeader() {
 			k.logger.Debug("Performing First Leader Action.")
 			err = k.performLeaderActions()
 			if err != nil {
-				k.errors <- &ShardConsumerError{
+				k.errors <- &ShardConsumerSignal{
 					Action: "performLeaderActions",
 					Error:  fmt.Errorf("error performing initial leader actions: %v", err),
 					Level:  WarnLevel,
@@ -81,7 +80,7 @@ func (k *Kinsumer) becomeLeader() {
 			case <-leaderActions.C:
 				ok, err := k.registerLeadership()
 				if err != nil {
-					k.errors <- &ShardConsumerError{
+					k.errors <- &ShardConsumerSignal{
 						Action: "registerLeadership",
 						Error:  fmt.Errorf("Error registering leadership: %v", err),
 						Level:  WarnLevel,
@@ -92,7 +91,7 @@ func (k *Kinsumer) becomeLeader() {
 				}
 				err = k.performLeaderActions()
 				if err != nil {
-					k.errors <- &ShardConsumerError{
+					k.errors <- &ShardConsumerSignal{
 						Action: "performLeaderActions",
 						Error:  fmt.Errorf("Error performing repeated leader actions: %v", err),
 						Level:  WarnLevel,
@@ -113,7 +112,7 @@ func (k *Kinsumer) unbecomeLeader() {
 		return
 	}
 	if k.leaderLost == nil {
-		log.Printf("Lost leadership but k.leaderLost was nil")
+		k.logger.Warn("Lost leadership but k.leaderLost was nil")
 	} else {
 		close(k.leaderLost)
 		k.leaderWG.Wait()

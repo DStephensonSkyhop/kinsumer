@@ -23,15 +23,25 @@ import (
 type loggerInterface interface {
 	Debug(args ...interface{})
 	Debugf(s string, args ...interface{})
+	Infof(s string, args ...interface{})
+	Warn(args ...interface{})
+	Warnf(s string, args ...interface{})
 	Errorf(s string, args ...interface{})
 	Tracef(s string, args ...interface{})
 }
 
-type ShardConsumerError struct {
+// ShardConsumerSignal signals to the kinsumer
+// or the consumer application that something
+// happened e.g. shardRefresh or subscribeToShard
+// error. The kinsumer or app (depending on who
+// is receiving this signal should take any
+// necessary action including propagating this
+// signal.
+type ShardConsumerSignal struct {
 	ShardID string
 	Action  string
 	Error   error
-	Level   uint32 // error levels consist of: WARNING, CRITICAL, FATAL
+	Level   uint32 // error levels e.g. WARNING, CRITICAL, FATAL
 }
 
 type ConsumedRecord struct {
@@ -54,10 +64,10 @@ type Kinsumer struct {
 	stoprequest           chan bool                 // channel used internally to signal to the main go routine to stop processing
 	records               chan *ConsumedRecord      // channel for the go routines to put the consumed records on
 	output                chan *ConsumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
-	errors                chan *ShardConsumerError  // channel used to communicate errors back to the caller
+	errors                chan *ShardConsumerSignal // channel used to communicate signals back to the caller
 	waitGroup             sync.WaitGroup            // waitGroup to sync the consumers go routines on
 	mainWG                sync.WaitGroup            // WaitGroup for the mainLoop
-	shardErrors           chan ShardConsumerError   // all the errors found by the consumers that were not handled
+	shardErrors           chan ShardConsumerSignal  // all the signals found by the consumers that were not handled
 	clientsTableName      string                    // dynamo table of info about each client
 	checkpointTableName   string                    // dynamo table of the checkpoints for each shard
 	metadataTableName     string                    // dynamo table of metadata about the leader and shards
@@ -136,8 +146,8 @@ func NewWithInterfaces(logger loggerInterface, kinesisi kinesisiface.KinesisAPI,
 		stoprequest:           make(chan bool),
 		records:               make(chan *ConsumedRecord, config.bufferSize),
 		output:                make(chan *ConsumedRecord),
-		errors:                make(chan *ShardConsumerError, 10),
-		shardErrors:           make(chan ShardConsumerError, 10),
+		errors:                make(chan *ShardConsumerSignal, 10),
+		shardErrors:           make(chan ShardConsumerSignal, 10),
 		checkpointTableName:   applicationName + "_checkpoints",
 		clientsTableName:      applicationName + "_clients",
 		metadataTableName:     applicationName + "_metadata",
@@ -416,7 +426,8 @@ func (k *Kinsumer) Run() error {
 		})
 		if err != nil {
 			if awse, ok := err.(awserr.Error); ok && awse.Code() == "ResourceInUseException" {
-				k.logger.Errorf("StreamConsumer for client %s already exists. Perhaps an improper shutdown occured. Remove it manually in AWS", k.clientID)
+				k.logger.Errorf("StreamConsumer for client %s already exists. Perhaps an improper shutdown occured. Removing it now", k.clientID)
+				k.deregisterEnhancedFanOutConsumer()
 			}
 			return errors.Wrap(err, "RegisterStreamConsumer")
 		}
@@ -439,7 +450,7 @@ func (k *Kinsumer) Run() error {
 			// fail to deregister, so ignore error here.
 			err := deregisterFromClientsTable(k.dynamodb, k.clientID, k.clientsTableName)
 			if err != nil {
-				k.errors <- &ShardConsumerError{
+				k.errors <- &ShardConsumerSignal{
 					Action: "deregisterFromClientsTable",
 					Error:  fmt.Errorf("error deregistering client: %s", err),
 					Level:  WarnLevel,
@@ -464,7 +475,7 @@ func (k *Kinsumer) Run() error {
 		}()
 
 		if err := k.startConsumers(enhancedFanOutRegistration); err != nil {
-			k.errors <- &ShardConsumerError{
+			k.errors <- &ShardConsumerSignal{
 				Action: "startConsumers",
 				Error:  fmt.Errorf("error starting consumers: %s", err),
 				Level:  WarnLevel,
@@ -500,13 +511,17 @@ func (k *Kinsumer) Run() error {
 				record.Checkpointer.Update(aws.StringValue(record.Record.SequenceNumber))
 				record = nil
 			case se := <-k.shardErrors:
-				k.logger.Errorf("shard error (%s) in %s: %s %d", se.ShardID, se.Action, se.Error, se.Level)
+				k.logger.Infof("shard error (%s) in %s: %v %d", se.ShardID, se.Action, se.Error, se.Level)
+				if se.Level == FatalLevel {
+					// abort should always be called before sending a fatal error back to the application
+					k.abort()
+				}
 				k.errors <- &se
 			case <-shardChangeTicker.C:
 				changed, err := k.refreshShards()
 				if err != nil {
 					k.abort()
-					k.errors <- &ShardConsumerError{
+					k.errors <- &ShardConsumerSignal{
 						Action: "refreshShards",
 						Error:  fmt.Errorf("error refreshing shards: %s (will not attempt to shutdown... aborting)", err),
 						Level:  FatalLevel, // fatal because of likely dynamo db issues
@@ -518,7 +533,7 @@ func (k *Kinsumer) Run() error {
 					k.stopConsumers()
 					record = nil
 					if err := k.startConsumers(enhancedFanOutRegistration); err != nil {
-						k.errors <- &ShardConsumerError{
+						k.errors <- &ShardConsumerSignal{
 							Action: "startConsumers",
 							Error:  fmt.Errorf("error restarting consumers: %s (shutting down)", err),
 							Level:  WarnLevel,
@@ -529,7 +544,7 @@ func (k *Kinsumer) Run() error {
 
 					// Notify directly to any consumers that the shards are being refreshed.
 					// To avoid any errors when dealing with shard size changes, this needs to be instant.
-					k.errors <- &ShardConsumerError{
+					k.errors <- &ShardConsumerSignal{
 						Action: "refreshShards",
 						Error:  fmt.Errorf("successfully Refreshed Shards"),
 						Level:  InfoLevel,
@@ -548,26 +563,32 @@ func (k *Kinsumer) Run() error {
 	return nil
 }
 
-// abort is called before sending a fatal error back to the application
-// so it must only contain actions that can be run in the face of a fatal
-// error.
+// abort should be called before sending any fatal error back to the application.
+// It must only contain actions that can be run in the face of a fatal error.
 func (k *Kinsumer) abort() {
-	k.logger.Debug("aborting the kinsumer")
+	k.logger.Debug("Aborting the kinsumer")
 	// If we are running in enhanced fan-out.. we will want to deregister the consumer
 	// and allow it to re-register if its starts up again.
-	if k.enhancedFanOutMode {
-		_, err := k.kinesis.DeregisterStreamConsumer(&kinesis.DeregisterStreamConsumerInput{
-			ConsumerName: aws.String(k.clientID),
-			StreamARN:    aws.String(k.streamARN),
-		})
-		if err != nil {
-			// If we fail to deregister, you will get a ResourceInUseException when the
-			// app starts up again
-			k.errors <- &ShardConsumerError{
-				Action: "deregisterEnhancedFanOutConsumer",
-				Error:  err,
-				Level:  WarnLevel,
-			}
+	k.deregisterEnhancedFanOutConsumer()
+}
+
+func (k *Kinsumer) deregisterEnhancedFanOutConsumer() {
+	// If we are not in enhanced fan-out mode do not attemtn to deregister
+	if !k.enhancedFanOutMode {
+		return
+	}
+	k.logger.Infof("Deregistering %s from enhanced fan-out consumers for stream %s", k.clientID, k.streamARN)
+	_, err := k.kinesis.DeregisterStreamConsumer(&kinesis.DeregisterStreamConsumerInput{
+		ConsumerName: aws.String(k.clientID),  // Should be unique amoung running client e.g. IP address
+		StreamARN:    aws.String(k.streamARN), // Will be blank unless we are in enhanced fan-out mode
+	})
+	// If we fail to deregister, you will get a ResourceInUseException when the
+	// app starts up again
+	if err != nil {
+		k.errors <- &ShardConsumerSignal{
+			Action: "deregisterEnhancedFanOutConsumer",
+			Error:  err,
+			Level:  WarnLevel,
 		}
 	}
 }
@@ -584,7 +605,7 @@ func (k *Kinsumer) Stop() {
 //
 // if err is non nil an error occurred in the system.
 // if err is nil and data is nil then kinsumer has been stopped
-func (k *Kinsumer) Next() (data *ConsumedRecord, err *ShardConsumerError) {
+func (k *Kinsumer) Next() (data *ConsumedRecord, err *ShardConsumerSignal) {
 	select {
 	case err = <-k.errors:
 		return nil, err
