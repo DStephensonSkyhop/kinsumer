@@ -170,6 +170,7 @@ func (k *Kinsumer) consume(shardID string) {
 	nextThrottle := time.After(0)
 
 	retryCount := 0
+	var lastSeqNum string
 
 mainloop:
 	for {
@@ -189,7 +190,7 @@ mainloop:
 		// If the shard has been closed, the shard iterator can't return more data and GetRecords
 		// returns null in NextShardIterator.
 		if next == "" {
-			k.endOfShard(checkpointer, startingIterator, iterator)
+			k.endOfShard(checkpointer, lastSeqNum, startingIterator, iterator)
 			return
 		}
 
@@ -248,6 +249,8 @@ mainloop:
 					}
 				}
 			}
+			// Update the last sequence number we saw, in case we reached the end of the stream.
+			lastSeqNum = aws.StringValue(records[len(records)-1].SequenceNumber)
 		}
 	}
 }
@@ -323,7 +326,7 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 		// split or merge has occurred that involved this shard. This shard is now in a
 		// CLOSED state, and you have read all available data records from this shard
 		if event.ContinuationSequenceNumber == nil {
-			k.endOfShard(checkpointer, startingSequenceNumber, sequenceNumber)
+			k.endOfShard(checkpointer, sequenceNumber, startingSequenceNumber, sequenceNumber)
 			return
 		}
 
@@ -368,7 +371,7 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 
 // endOfShard marks the shard's checkpointer as finsihed an releases it if it deems
 // necessary. Start and end are values used to determine if we started at the end of a shard.
-func (k *Kinsumer) endOfShard(checkpointer *Checkpointer, start, end string) {
+func (k *Kinsumer) endOfShard(checkpointer *Checkpointer, finalSeqNumber, start, end string) {
 	shardID := checkpointer.GetShardID()
 	k.logger.Debugf("End of shard detected. Marking this checkpointer for %s as Finished", shardID)
 	// Mark the checkpointer as finished. The application is responsible
@@ -389,7 +392,7 @@ func (k *Kinsumer) endOfShard(checkpointer *Checkpointer, start, end string) {
 		// checkpoint attempt will be ignored because we dont care to checkpoint a
 		// checkpointer that is already completed. Same goes if the app tries to release it.
 		k.logger.Warnf("Looks like this checkpointer that was left open for shard %s. Releasing it now", shardID)
+		checkpointer.CommitWithSequenceNumber(finalSeqNumber)
 		checkpointer.Release()
 	}
-	return
 }
