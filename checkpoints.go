@@ -30,6 +30,7 @@ type Checkpointer struct {
 	dirty                 bool
 	mutex                 sync.Mutex
 	finished              bool
+	finalSequenceNumber   string
 	logger                loggerInterface
 }
 
@@ -180,7 +181,7 @@ func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, e
 		LastUpdateRFC:  now.UTC().Format(time.RFC1123Z),
 	}
 	finished := false
-	if cp.finished {
+	if cp.finished && (cp.sequenceNumber == cp.finalSequenceNumber || cp.finalSequenceNumber == "") {
 		record.Finished = aws.Int64(now.UnixNano())
 		record.FinishedRFC = aws.String(now.UTC().Format(time.RFC1123Z))
 		finished = true
@@ -279,9 +280,11 @@ func (cp *Checkpointer) Update(sequenceNumber string) {
 }
 
 // Finish marks the given sequence number as the final one for the shard.
-func (cp *Checkpointer) Finish() {
+// finalSequenceNumber is an empty string if we never read anything from the shard.
+func (cp *Checkpointer) Finish(finalSequenceNumber string) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
+	cp.finalSequenceNumber = finalSequenceNumber
 	cp.finished = true
 }
 

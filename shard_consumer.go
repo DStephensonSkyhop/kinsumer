@@ -38,7 +38,7 @@ func (k *Kinsumer) getShardIterator(streamName string, shardID string, sequenceN
 	// from the horizon
 	ps := aws.String(sequenceNumber)
 	if sequenceNumber == "" {
-		k.logger.Debugf("No Sequence Number, starting from latest, Shard ID: %s", shardID)
+		k.logger.Debugf("No Sequence Number, starting from %s, Shard ID: %s", iteratorType, shardID)
 		shardIteratorType = iteratorType
 		ps = nil
 	}
@@ -66,7 +66,7 @@ func (k *Kinsumer) subscribeToShard(consumerARN *string, shardID string, sequenc
 	// from the horizon
 	ps := aws.String(sequenceNumber)
 	if sequenceNumber == "" {
-		k.logger.Debugf("No Sequence Number, starting from latest, Shard ID: %s", shardID)
+		k.logger.Debugf("No Sequence Number, starting from %s, Shard ID: %s", iteratorType, shardID)
 		shardIteratorType = iteratorType
 		ps = nil
 	}
@@ -91,7 +91,6 @@ func getRecords(k kinesisiface.KinesisAPI, iterator string) (records []*kinesis.
 	}
 
 	output, err := k.GetRecords(params)
-
 	if err != nil {
 		return nil, "", 0, err
 	}
@@ -157,14 +156,12 @@ func (k *Kinsumer) consume(shardID string) {
 	sequenceNumber := checkpointer.GetSequenceNumber()
 
 	// Get the starting shard iterator
-	startingIterator, err := k.getShardIterator(k.streamName, shardID, sequenceNumber, k.config.shardIteratorType)
+	iterator, err := k.getShardIterator(k.streamName, shardID, sequenceNumber, k.config.shardIteratorType)
 	if err != nil {
 		k.shardErrors <- ShardConsumerSignal{ShardID: shardID, Action: "getShardIterator", Error: err, Level: FatalLevel}
 		return
 	}
 	k.logger.Debugf("getShardIterator, SequenceNumber: %s, Shard ID: %s", sequenceNumber, shardID)
-
-	iterator := startingIterator
 
 	// no throttle on the first request.
 	nextThrottle := time.After(0)
@@ -186,20 +183,9 @@ mainloop:
 
 		// Get records from kinesis
 		records, next, lag, err := getRecords(k.kinesis, iterator)
-
-		// If the shard has been closed, the shard iterator can't return more data and GetRecords
-		// returns null in NextShardIterator.
-		if next == "" {
-			k.endOfShard(checkpointer, lastSeqNum, startingIterator, iterator)
-			return
-		}
-
-		iterator = next
-
 		if err != nil {
 			retryCount++
 			k.logger.Debugf("Failed to get records... retrying (%v/%v)", retryCount, k.config.shardRetryLimit)
-
 			if awsErr, ok := err.(awserr.Error); ok {
 				k.logger.Debugf("Failed to get records, AWS error: %v, %v", awsErr.Message(), awsErr.OrigErr())
 
@@ -209,7 +195,6 @@ mainloop:
 					return
 				}
 			}
-
 			// Close shard if maximum number of retries is exceeded.
 			// If we can't get records from this shard, we will close the entire app, instead of this single shard
 			// because the checkpointer would need to be released, and the responsibility for that was moved to the application.
@@ -227,6 +212,23 @@ mainloop:
 			continue mainloop
 		}
 		retryCount = 0
+
+		// If the shard has been closed, the shard iterator can't return more data and GetRecords
+		// returns null in NextShardIterator.
+		if next == "" {
+			if len(records) > 0 {
+				// This should not happen, if it does then the AWS docs on how this works
+				// is misleading and we need to move this logic AFTER the RecordLoop: which
+				// will open us up to the possibility that the app will checkpoint before
+				// we mark a checkpointer as almost finished.
+				k.shardErrors <- ShardConsumerSignal{ShardID: shardID, Action: "getRecords", Error: errors.Errorf("records found in an event with a nil NextShardIterator!"), Level: FatalLevel}
+				return
+			}
+			k.endOfShard(checkpointer, lastSeqNum)
+			return
+		}
+
+		iterator = next
 
 		// Put all the records we got onto the channel
 		k.config.stats.EventsFromKinesis(len(records), shardID, lag)
@@ -274,15 +276,15 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 		return
 	}
 
-	startingSequenceNumber := checkpointer.GetSequenceNumber()
+	sequenceNumber := checkpointer.GetSequenceNumber()
 
 	// Subscribe to the shard using enhanced fan-out
-	out, err := k.subscribeToShard(registered.Consumer.ConsumerARN, shardID, startingSequenceNumber, k.config.shardIteratorType)
+	out, err := k.subscribeToShard(registered.Consumer.ConsumerARN, shardID, sequenceNumber, k.config.shardIteratorType)
 	if err != nil {
 		k.shardErrors <- ShardConsumerSignal{ShardID: shardID, Action: "subscribeToShard", Error: err, Level: FatalLevel}
 		return
 	}
-	k.logger.Debugf("subscribeToShard, SequenceNumber: %v, Shard ID: %v\n", startingSequenceNumber, shardID)
+	k.logger.Debugf("subscribeToShard, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
 
 	// A shard iterator expires 5 minutes after it is returned to the requester.
 	// You need to call SubscribeToShard again to renew the subscription if you
@@ -292,7 +294,7 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 	subscribeInterval := 4 * time.Minute
 
 	nextSubscribe := time.After(subscribeInterval)
-	sequenceNumber := startingSequenceNumber
+	var lastSeqNum string
 
 	for {
 		var evt kinesis.SubscribeToShardEventStreamEvent
@@ -300,7 +302,7 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 		case <-k.stop:
 			return
 		case <-nextSubscribe:
-			k.logger.Debugf("re-subscribeToShard Shard %s at sequence number %s\n", shardID, sequenceNumber)
+			k.logger.Debugf("re-subscribeToShard Shard %s at continuation sequence number %s\n", shardID, sequenceNumber)
 			var err error
 			out, err = k.subscribeToShard(registered.Consumer.ConsumerARN, shardID, sequenceNumber, k.config.shardIteratorType)
 			if err != nil {
@@ -326,7 +328,15 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 		// split or merge has occurred that involved this shard. This shard is now in a
 		// CLOSED state, and you have read all available data records from this shard
 		if event.ContinuationSequenceNumber == nil {
-			k.endOfShard(checkpointer, sequenceNumber, startingSequenceNumber, sequenceNumber)
+			if len(event.Records) > 0 {
+				// This should not happen, if it does then the AWS docs on how this works
+				// is misleading and we need to move this logic AFTER the RecordLoop: which
+				// will open us up to the possibility that the app will checkpoint before
+				// we mark a checkpointer as almost finished.
+				k.shardErrors <- ShardConsumerSignal{ShardID: shardID, Action: "subscribeToShard", Error: errors.Errorf("records found in an event with a nil ContinuationSequenceNumber!"), Level: FatalLevel}
+				return
+			}
+			k.endOfShard(checkpointer, lastSeqNum)
 			return
 		}
 
@@ -365,23 +375,26 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 					break RecordLoop
 				}
 			}
+			// Update the last sequence number we saw, in case we reached the end of the stream.
+			lastSeqNum = aws.StringValue(records[len(records)-1].SequenceNumber)
 		}
 	}
 }
 
 // endOfShard marks the shard's checkpointer as finsihed an releases it if it deems
 // necessary. Start and end are values used to determine if we started at the end of a shard.
-func (k *Kinsumer) endOfShard(checkpointer *Checkpointer, finalSeqNumber, start, end string) {
+func (k *Kinsumer) endOfShard(checkpointer *Checkpointer, finalSeqNumber string) {
 	shardID := checkpointer.GetShardID()
 	k.logger.Debugf("End of shard detected. Marking this checkpointer for %s as Finished", shardID)
 	// Mark the checkpointer as finished. The application is responsible
-	// for proecessing the records associated with it, calling Commit(),
+	// for proecessing the records associated with it, calling Commit() with
+	// with the finalSeqNumber so that it gets marked as finished in dynamo,
 	// checking if this checkpointer is finished and, if so, releasing it.
-	checkpointer.Finish()
+	checkpointer.Finish(finalSeqNumber)
 	// This means that we have a checkpoint in the database that
 	// starts at the end of a shard. We can end up in the situation
-	// if the application fails release a checkpointer.
-	if start == end {
+	// if the application fails to Finish a checkpointer.
+	if finalSeqNumber == "" {
 		// Releasing a checkpointer is the reponsibility of the application that is
 		// using this library. If we have a checkpoint at the end of a shard that means
 		// the app processed everything and checkpointed it but has not yet released it.
