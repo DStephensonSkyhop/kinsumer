@@ -284,7 +284,7 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 		k.shardErrors <- ShardConsumerSignal{ShardID: shardID, Action: "subscribeToShard", Error: err, Level: FatalLevel}
 		return
 	}
-	k.logger.Debugf("subscribeToShard, SequenceNumber: %v, Shard ID: %v\n", sequenceNumber, shardID)
+	k.logger.Debugf("subscribeToShard, SequenceNumber: %v, Shard ID: %v", sequenceNumber, shardID)
 
 	// A shard iterator expires 5 minutes after it is returned to the requester.
 	// You need to call SubscribeToShard again to renew the subscription if you
@@ -302,7 +302,7 @@ func (k *Kinsumer) consumeWithFanOut(shardID string, registered *kinesis.Registe
 		case <-k.stop:
 			return
 		case <-nextSubscribe:
-			k.logger.Debugf("re-subscribeToShard Shard %s at continuation sequence number %s\n", shardID, sequenceNumber)
+			k.logger.Debugf("re-subscribeToShard Shard %s at continuation sequence number %s", shardID, sequenceNumber)
 			var err error
 			out, err = k.subscribeToShard(registered.Consumer.ConsumerARN, shardID, sequenceNumber, k.config.shardIteratorType)
 			if err != nil {
