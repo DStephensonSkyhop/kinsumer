@@ -4,6 +4,8 @@ package kinsumer
 
 import (
 	"time"
+
+	"github.com/ericksonjoseph/kinsumer/statsd"
 )
 
 //TODO: Update documentation to include the defaults
@@ -11,7 +13,7 @@ import (
 
 // Config holds all configuration values for a single Kinsumer instance
 type Config struct {
-	stats StatReceiver
+	stats statsd.StatReceiver
 
 	// ---------- [ Per Shard Worker ] ----------
 	// Time to sleep if no records are found
@@ -25,6 +27,10 @@ type Config struct {
 	// ---------- [ For the leader (first client alphabetically) ] ----------
 	// Time between leader actions
 	leaderActionFrequency time.Duration
+
+	// shard starting point
+	// LATEST, TRIM_HORIZON
+	shardIteratorType string
 
 	// ---------- [ For the entire Kinsumer ] ----------
 	// Size of the buffer for the combined records channel. When the channel fills up
@@ -40,6 +46,21 @@ type Config struct {
 	dynamoWriteCapacity int64
 	// Time to wait between attempts to verify tables were created/deleted completely
 	dynamoWaiterDelay time.Duration
+
+	// Maximum number of retries before closing a shard
+	shardRetryLimit int
+
+	// This feature enables consumers to receive records from a stream with throughput
+	// of up to 2 MB of data per second per shard. This throughput is dedicated,
+	// which means that consumers that use enhanced fan-out don't have to contend
+	// with other consumers that are receiving data from the stream.
+	enhancedFanOutMode bool
+
+	// Amount of time to wait after registering this consumer as an enhanced fan-out consumer.
+	// You may wonder why not call ListStreamConsumer in a loop until the state is ACTIVE.
+	// We avoid those calls because AWS puts a hard limit of 5 req/second per stream on that
+	// endpoint which will be easy to breach if you have multiple consumers.
+	enhancedFanOutSleep time.Duration
 }
 
 // NewConfig returns a default Config struct
@@ -47,13 +68,16 @@ func NewConfig() Config {
 	return Config{
 		throttleDelay:         250 * time.Millisecond,
 		commitFrequency:       1000 * time.Millisecond,
-		shardCheckFrequency:   1 * time.Minute,
-		leaderActionFrequency: 1 * time.Minute,
+		shardCheckFrequency:   5 * time.Second,
+		leaderActionFrequency: 60 * time.Second,
 		bufferSize:            100,
 		stats:                 &NoopStatReceiver{},
 		dynamoReadCapacity:    10,
 		dynamoWriteCapacity:   10,
 		dynamoWaiterDelay:     3 * time.Second,
+		shardRetryLimit:       10,
+		enhancedFanOutMode:    false,
+		enhancedFanOutSleep:   10 * time.Second,
 	}
 }
 
@@ -88,7 +112,7 @@ func (c Config) WithBufferSize(bufferSize int) Config {
 }
 
 // WithStats returns a Config with a modified stats
-func (c Config) WithStats(stats StatReceiver) Config {
+func (c Config) WithStats(stats statsd.StatReceiver) Config {
 	c.stats = stats
 	return c
 }
@@ -108,6 +132,30 @@ func (c Config) WithDynamoWriteCapacity(writeCapacity int64) Config {
 // WithDynamoWaiterDelay returns a Config with a modified dynamo waiter delay
 func (c Config) WithDynamoWaiterDelay(delay time.Duration) Config {
 	c.dynamoWaiterDelay = delay
+	return c
+}
+
+// WithShardRetryLimit
+func (c Config) WithShardRetryLimit(limit int) Config {
+	c.shardRetryLimit = limit
+	return c
+}
+
+// WithShardIteratorType
+func (c Config) WithShardIteratorType(iterator string) Config {
+	c.shardIteratorType = iterator
+	return c
+}
+
+// WithEnhancedFanOutMode
+func (c Config) WithEnhancedFanOutMode(enabled bool) Config {
+	c.enhancedFanOutMode = enabled
+	return c
+}
+
+// WithEnhancedFanOutSleep
+func (c Config) WithEnhancedFanOutSleep(duration time.Duration) Config {
+	c.enhancedFanOutSleep = duration
 	return c
 }
 
@@ -143,6 +191,12 @@ func validateConfig(c *Config) error {
 
 	if c.dynamoReadCapacity == 0 || c.dynamoWriteCapacity == 0 {
 		return ErrConfigInvalidDynamoCapacity
+	}
+
+	// If you are using enhanced fan-out mode, you should sleep for at least
+	// 1 seconds after registering this consumer.
+	if c.enhancedFanOutMode && c.enhancedFanOutSleep/time.Second < 1 {
+		return ErrConfigInvalidEnhancedFanOutSleep
 	}
 
 	return nil

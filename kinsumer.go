@@ -9,25 +9,44 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
-	"github.com/twinj/uuid"
+	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
 )
 
-type shardConsumerError struct {
-	shardID string
-	action  string
-	err     error
+type loggerInterface interface {
+	Debug(args ...interface{})
+	Debugf(s string, args ...interface{})
+	Infof(s string, args ...interface{})
+	Warn(args ...interface{})
+	Warnf(s string, args ...interface{})
+	Errorf(s string, args ...interface{})
+	Tracef(s string, args ...interface{})
 }
 
-type consumedRecord struct {
-	record       *kinesis.Record // Record retrieved from kinesis
-	checkpointer *checkpointer   // Object that will store the checkpoint back to the database
+// ShardConsumerSignal signals to the kinsumer
+// or the consumer application that something
+// happened e.g. shardRefresh or subscribeToShard
+// error. The kinsumer or app (depending on who
+// is receiving this signal should take any
+// necessary action including propagating this
+// signal.
+type ShardConsumerSignal struct {
+	ShardID string
+	Action  string
+	Error   error
+	Level   uint32 // error levels e.g. WARNING, CRITICAL, FATAL
+}
+
+type ConsumedRecord struct {
+	Record       *kinesis.Record // Record retrieved from kinesis
+	Checkpointer *Checkpointer   // Object that will store the checkpoint back to the database
 	retrievedAt  time.Time       // Time the record was retrieved from Kinesis
 }
 
@@ -37,15 +56,18 @@ type Kinsumer struct {
 	kinesis               kinesisiface.KinesisAPI   // interface to the kinesis service
 	dynamodb              dynamodbiface.DynamoDBAPI // interface to the dynamodb service
 	streamName            string                    // name of the kinesis stream to consume from
+	enhancedFanOutMode    bool                      // Whether this client runs as an enhanced fan-out consumer events are pushed
+	enhancedFanOutSleep   time.Duration             // Number of seconds it takes a newly registered enhanced fan-out consumer to become ACTIVE
+	streamARN             string                    // ARN of the kinesis stream to consume from when using enhanced fan-out
 	shardIDs              []string                  // all the shards in the stream, for detecting when the shards change
 	stop                  chan struct{}             // channel used to signal to all the go routines that we want to stop consuming
 	stoprequest           chan bool                 // channel used internally to signal to the main go routine to stop processing
-	records               chan *consumedRecord      // channel for the go routines to put the consumed records on
-	output                chan *consumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
-	errors                chan error                // channel used to communicate errors back to the caller
+	records               chan *ConsumedRecord      // channel for the go routines to put the consumed records on
+	output                chan *ConsumedRecord      // unbuffered channel used to communicate from the main loop to the Next() method
+	errors                chan *ShardConsumerSignal // channel used to communicate signals back to the caller
 	waitGroup             sync.WaitGroup            // waitGroup to sync the consumers go routines on
 	mainWG                sync.WaitGroup            // WaitGroup for the mainLoop
-	shardErrors           chan shardConsumerError   // all the errors found by the consumers that were not handled
+	shardErrors           chan ShardConsumerSignal  // all the signals found by the consumers that were not handled
 	clientsTableName      string                    // dynamo table of info about each client
 	checkpointTableName   string                    // dynamo table of the checkpoints for each shard
 	metadataTableName     string                    // dynamo table of metadata about the leader and shards
@@ -60,28 +82,32 @@ type Kinsumer struct {
 	leaderWG              sync.WaitGroup            // waitGroup for the leader loop
 	maxAgeForClientRecord time.Duration             // Cutoff for client/checkpoint records we read from dynamodb before we assume the record is stale
 	maxAgeForLeaderRecord time.Duration             // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
+	logger                loggerInterface           // Cutoff for leader/shard cache records we read from dynamodb before we assume the record is stale
 }
 
 // New returns a Kinsumer Interface with default kinesis and dynamodb instances, to be used in ec2 instances to get default auth and config
-func New(streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+func New(logger loggerInterface, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
 	s, err := session.NewSession()
 	if err != nil {
 		return nil, err
 	}
-	return NewWithSession(s, streamName, applicationName, clientName, config)
+	return NewWithSession(logger, s, streamName, applicationName, clientName, config)
 }
 
 // NewWithSession should be used if you want to override the Kinesis and Dynamo instances with a non-default aws session
-func NewWithSession(session *session.Session, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+func NewWithSession(logger loggerInterface, session *session.Session, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
 	k := kinesis.New(session)
 	d := dynamodb.New(session)
 
-	return NewWithInterfaces(k, d, streamName, applicationName, clientName, config)
+	return NewWithInterfaces(logger, k, d, streamName, applicationName, clientName, config)
 }
 
 // NewWithInterfaces allows you to override the Kinesis and Dynamo instances for mocking or using a local set of servers
-func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.DynamoDBAPI, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
-	if kinesis == nil {
+func NewWithInterfaces(logger loggerInterface, kinesisi kinesisiface.KinesisAPI, dynamodb dynamodbiface.DynamoDBAPI, streamName, applicationName, clientName string, config Config) (*Kinsumer, error) {
+	if logger == nil {
+		return nil, ErrNoLoggerInterface
+	}
+	if kinesisi == nil {
 		return nil, ErrNoKinesisInterface
 	}
 	if dynamodb == nil {
@@ -97,23 +123,40 @@ func NewWithInterfaces(kinesis kinesisiface.KinesisAPI, dynamodb dynamodbiface.D
 		return nil, err
 	}
 
+	// enhanced fan-out mode requires the ARN For whatever reason
+	var streamARN string
+	if config.enhancedFanOutMode {
+		stream, err := kinesisi.DescribeStream(&kinesis.DescribeStreamInput{
+			StreamName: aws.String(streamName),
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "describe-stream to get ARN for enhanced fan-out")
+		}
+		streamARN = aws.StringValue(stream.StreamDescription.StreamARN)
+		logger.Debugf("found the streamARN for %s: %s", streamName, streamARN)
+	}
+
 	consumer := &Kinsumer{
-		streamName:            streamName,
-		kinesis:               kinesis,
+		kinesis:               kinesisi,
 		dynamodb:              dynamodb,
+		streamName:            streamName,
+		enhancedFanOutMode:    config.enhancedFanOutMode,
+		enhancedFanOutSleep:   config.enhancedFanOutSleep,
+		streamARN:             streamARN,
 		stoprequest:           make(chan bool),
-		records:               make(chan *consumedRecord, config.bufferSize),
-		output:                make(chan *consumedRecord),
-		errors:                make(chan error, 10),
-		shardErrors:           make(chan shardConsumerError, 10),
+		records:               make(chan *ConsumedRecord, config.bufferSize),
+		output:                make(chan *ConsumedRecord),
+		errors:                make(chan *ShardConsumerSignal, 10),
+		shardErrors:           make(chan ShardConsumerSignal, 10),
 		checkpointTableName:   applicationName + "_checkpoints",
 		clientsTableName:      applicationName + "_clients",
 		metadataTableName:     applicationName + "_metadata",
-		clientID:              uuid.NewV4().String(),
+		clientID:              clientName,
 		clientName:            clientName,
 		config:                config,
 		maxAgeForClientRecord: config.shardCheckFrequency * 5,
 		maxAgeForLeaderRecord: config.leaderActionFrequency * 5,
+		logger:                logger,
 	}
 	return consumer, nil
 }
@@ -158,13 +201,26 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 
 	shardIDs, err = loadShardIDsFromDynamo(k.dynamodb, k.metadataTableName)
 	if err != nil {
+		k.logger.Debug("refreshShards - load shard IDs error: ", err)
 		return false, err
+	}
+
+	if len(shardIDs) == 0 {
+		shardIDs, err = loadShardIDsFromKinesis(k.kinesis, k.streamName)
+		if err != nil {
+			return false, err
+		}
+		sErr := k.setCachedShardIDs(shardIDs)
+		if sErr != nil {
+			return false, sErr
+		}
 	}
 
 	changed := (totalClients != k.totalClients) ||
 		(thisClient != k.thisClient) ||
 		(len(k.shardIDs) != len(shardIDs))
 
+	//k.logger.Debug("refreshShards - changed: ", changed)
 	if !changed {
 		for idx := range shardIDs {
 			if shardIDs[idx] != k.shardIDs[idx] {
@@ -186,24 +242,35 @@ func (k *Kinsumer) refreshShards() (bool, error) {
 
 // startConsumers launches a shard consumer for each shard we should own
 // TODO: Can we unit test this at all?
-func (k *Kinsumer) startConsumers() error {
+func (k *Kinsumer) startConsumers(registered *kinesis.RegisterStreamConsumerOutput) error {
 	k.stop = make(chan struct{})
 	assigned := false
 
+	k.logger.Debug("StartConsumers - thisClient / shardIDs: ", k.thisClient, len(k.shardIDs))
 	if k.thisClient >= len(k.shardIDs) {
 		return nil
 	}
 
+	k.logger.Debug("StartConsumers - creating shards: ", len(k.shardIDs))
 	for i, shard := range k.shardIDs {
+		// Evenly distributes the shards between clients
 		if (i % k.totalClients) == k.thisClient {
 			k.waitGroup.Add(1)
 			assigned = true
-			go k.consume(shard)
+
+			k.logger.Debug("StartConsumers - beginning consumption for shard: ", shard)
+			if registered == nil {
+				go k.consume(shard)
+			} else {
+				go k.consumeWithFanOut(shard, registered)
+			}
 		}
 	}
+	// This may happen if we have more clients than shards
 	if len(k.shardIDs) != 0 && !assigned {
 		return ErrNoShardsAssigned
 	}
+
 	return nil
 }
 
@@ -230,8 +297,8 @@ func (k *Kinsumer) dynamoTableActive(name string) error {
 		return fmt.Errorf("error describing table %s: %v", name, err)
 	}
 	status := aws.StringValue(out.Table.TableStatus)
-	if status != "ACTIVE" {
-		return fmt.Errorf("table %s exists but state '%s' is not 'ACTIVE'", name, status)
+	if status != "ACTIVE" && status != "UPDATING" {
+		return fmt.Errorf("table %s exists but state '%s' is not 'ACTIVE' or 'UPDATING'", name, status)
 	}
 	return nil
 }
@@ -319,8 +386,9 @@ func (k *Kinsumer) kinesisStreamReady() error {
 
 // Run runs the main kinesis consumer process. This is a non-blocking call, use Stop() to force it to return.
 // This goroutine is responsible for startin/stopping consumers, aggregating all consumers' records,
-// updating checkpointers as records are consumed, and refreshing our shard/client list and leadership
+// updating Checkpointers as records are consumed, and refreshing our shard/client list and leadership
 //TODO: Can we unit test this at all?
+// funcRefresh - function pointer that will be called anytime the shards are being refreshed.
 func (k *Kinsumer) Run() error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
 		return err
@@ -346,26 +414,56 @@ func (k *Kinsumer) Run() error {
 		return fmt.Errorf("error in kinsumer Run initial refreshShards: %v", err)
 	}
 
+	// enhancedFanOutRegistration is not nil if we are running in
+	// enhanced fan-out mode
+	var enhancedFanOutRegistration *kinesis.RegisterStreamConsumerOutput
+
+	if k.enhancedFanOutMode {
+		var err error
+		enhancedFanOutRegistration, err = k.kinesis.RegisterStreamConsumer(&kinesis.RegisterStreamConsumerInput{
+			ConsumerName: aws.String(k.clientID),
+			StreamARN:    aws.String(k.streamARN),
+		})
+		if err != nil {
+			if awse, ok := err.(awserr.Error); ok && awse.Code() == "ResourceInUseException" {
+				k.logger.Errorf("StreamConsumer for client %s already exists. Perhaps an improper shutdown occured. Removing it now", k.clientID)
+				k.deregisterEnhancedFanOutConsumer()
+			}
+			return errors.Wrap(err, "RegisterStreamConsumer")
+		}
+		k.logger.Debugf("RegisterStreamConsumer successful (enhanced-fan-out): %s", *enhancedFanOutRegistration.Consumer.ConsumerARN)
+
+		// Wait a few seconds for the register to complete. I would like to call ListStreamConsumer
+		// to make sure its complete but AWS puts a hard limit of 5 req/second per stream on that
+		// endpoint which makes it difficult for us to use it with multiple consumers :/
+		k.logger.Debug("Sleeping to give the newly registered stream consumer time become ACTIVE")
+		time.Sleep(k.enhancedFanOutSleep)
+	}
+
 	k.mainWG.Add(1)
 	go func() {
 		defer k.mainWG.Done()
 
 		defer func() {
+
 			// Deregister is a nice to have but clients also time out if they
 			// fail to deregister, so ignore error here.
 			err := deregisterFromClientsTable(k.dynamodb, k.clientID, k.clientsTableName)
 			if err != nil {
-				k.errors <- fmt.Errorf("error deregistering client: %s", err)
+				k.errors <- &ShardConsumerSignal{
+					Action: "deregisterFromClientsTable",
+					Error:  fmt.Errorf("error deregistering client: %s", err),
+					Level:  WarnLevel,
+				}
 			}
-			if k.isLeader {
-				close(k.leaderLost)
-				k.leaderLost = nil
-				k.isLeader = false
-			}
+			k.unbecomeLeader()
 			// Do this outside the k.isLeader check in case k.isLeader was false because
 			// we lost leadership but haven't had time to shutdown the goroutine yet.
 			k.leaderWG.Wait()
 		}()
+
+		// Run any other last min cleanup actions
+		defer k.abort()
 
 		// We close k.output so that Next() stops, this is also the reason
 		// we can't allow Run() to be called after Stop() has happened
@@ -376,16 +474,23 @@ func (k *Kinsumer) Run() error {
 			shardChangeTicker.Stop()
 		}()
 
-		var record *consumedRecord
-		if err := k.startConsumers(); err != nil {
-			k.errors <- fmt.Errorf("error starting consumers: %s", err)
+		if err := k.startConsumers(enhancedFanOutRegistration); err != nil {
+			k.errors <- &ShardConsumerSignal{
+				Action: "startConsumers",
+				Error:  fmt.Errorf("error starting consumers: %s", err),
+				Level:  WarnLevel,
+			}
+			return
 		}
+
+		// defer stopping the Consumers after we've started them
 		defer k.stopConsumers()
 
+		var record *ConsumedRecord
 		for {
 			var (
-				input  chan *consumedRecord
-				output chan *consumedRecord
+				input  chan *ConsumedRecord
+				output chan *ConsumedRecord
 			)
 
 			// We only want to be handing one record from the consumers
@@ -403,30 +508,89 @@ func (k *Kinsumer) Run() error {
 				return
 			case record = <-input:
 			case output <- record:
-				record.checkpointer.update(aws.StringValue(record.record.SequenceNumber))
+				record.Checkpointer.Update(aws.StringValue(record.Record.SequenceNumber))
 				record = nil
 			case se := <-k.shardErrors:
-				k.errors <- fmt.Errorf("shard error (%s) in %s: %s", se.shardID, se.action, se.err)
+				k.logger.Infof("shard error (%s) in %s: %v %d", se.ShardID, se.Action, se.Error, se.Level)
+				if se.Level == FatalLevel {
+					// abort should always be called before sending a fatal error back to the application
+					k.abort()
+				}
+				k.errors <- &se
 			case <-shardChangeTicker.C:
 				changed, err := k.refreshShards()
 				if err != nil {
-					k.errors <- fmt.Errorf("error refreshing shards: %s", err)
+					k.abort()
+					k.errors <- &ShardConsumerSignal{
+						Action: "refreshShards",
+						Error:  fmt.Errorf("error refreshing shards: %s (will not attempt to shutdown... aborting)", err),
+						Level:  FatalLevel, // fatal because of likely dynamo db issues
+					}
 				} else if changed {
+					k.logger.Debug("Refreshing Shards.... ")
+
 					shardChangeTicker.Stop()
 					k.stopConsumers()
 					record = nil
-					if err := k.startConsumers(); err != nil {
-						k.errors <- fmt.Errorf("error restarting consumers: %s", err)
+					if err := k.startConsumers(enhancedFanOutRegistration); err != nil {
+						k.errors <- &ShardConsumerSignal{
+							Action: "startConsumers",
+							Error:  fmt.Errorf("error restarting consumers: %s (shutting down)", err),
+							Level:  WarnLevel,
+						}
+						// Return allows us to shut down this consumer gracefully
+						return
 					}
+
+					// Notify directly to any consumers that the shards are being refreshed.
+					// To avoid any errors when dealing with shard size changes, this needs to be instant.
+					k.errors <- &ShardConsumerSignal{
+						Action: "refreshShards",
+						Error:  fmt.Errorf("successfully Refreshed Shards"),
+						Level:  InfoLevel,
+					}
+
+					//oneTimeChange = false
 					// We create a new shardChangeTicker here so that the time it takes to stop and
 					// start the consumers is not included in the wait for the next tick.
 					shardChangeTicker = time.NewTicker(k.config.shardCheckFrequency)
+					k.logger.Debug("successfully Refreshed Shards")
 				}
 			}
 		}
 	}()
 
 	return nil
+}
+
+// abort should be called before sending any fatal error back to the application.
+// It must only contain actions that can be run in the face of a fatal error.
+func (k *Kinsumer) abort() {
+	k.logger.Debug("Aborting the kinsumer")
+	// If we are running in enhanced fan-out.. we will want to deregister the consumer
+	// and allow it to re-register if its starts up again.
+	k.deregisterEnhancedFanOutConsumer()
+}
+
+func (k *Kinsumer) deregisterEnhancedFanOutConsumer() {
+	// If we are not in enhanced fan-out mode do not attemtn to deregister
+	if !k.enhancedFanOutMode {
+		return
+	}
+	k.logger.Infof("Deregistering %s from enhanced fan-out consumers for stream %s", k.clientID, k.streamARN)
+	_, err := k.kinesis.DeregisterStreamConsumer(&kinesis.DeregisterStreamConsumerInput{
+		ConsumerName: aws.String(k.clientID),  // Should be unique amoung running client e.g. IP address
+		StreamARN:    aws.String(k.streamARN), // Will be blank unless we are in enhanced fan-out mode
+	})
+	// If we fail to deregister, you will get a ResourceInUseException when the
+	// app starts up again
+	if err != nil {
+		k.errors <- &ShardConsumerSignal{
+			Action: "deregisterEnhancedFanOutConsumer",
+			Error:  err,
+			Level:  WarnLevel,
+		}
+	}
 }
 
 // Stop stops the consumption of kinesis events
@@ -441,14 +605,14 @@ func (k *Kinsumer) Stop() {
 //
 // if err is non nil an error occurred in the system.
 // if err is nil and data is nil then kinsumer has been stopped
-func (k *Kinsumer) Next() (data []byte, err error) {
+func (k *Kinsumer) Next() (data *ConsumedRecord, err *ShardConsumerSignal) {
 	select {
 	case err = <-k.errors:
 		return nil, err
 	case record, ok := <-k.output:
 		if ok {
-			k.config.stats.EventToClient(*record.record.ApproximateArrivalTimestamp, record.retrievedAt)
-			data = record.record.Data
+			k.config.stats.EventToClient(*record.Record.ApproximateArrivalTimestamp, record.retrievedAt, len(record.Record.Data))
+			data = record
 		}
 	}
 

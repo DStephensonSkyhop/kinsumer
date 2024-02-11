@@ -1,6 +1,6 @@
 // Copyright (c) 2016 Twitch Interactive
 
-package kinsumer
+package statsd
 
 import "time"
 
@@ -19,7 +19,8 @@ type StatReceiver interface {
 	// EventToClient is called every time a record is returned to the client
 	// `inserted` is the approximate time the record was inserted into kinesis
 	// `retrieved` is the time when kinsumer retrieved the record from kinesis
-	EventToClient(inserted, retrieved time.Time)
+	// `size` is the number of bytes fetched from kinesis
+	EventToClient(inserted, retrieved time.Time, size int)
 
 	// EventsFromKinesis is called every time a bunch of records is retrieved from
 	// a kinesis shard.

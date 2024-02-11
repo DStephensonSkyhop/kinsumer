@@ -4,7 +4,6 @@ package kinsumer
 
 import (
 	"fmt"
-	"log"
 	"sort"
 	"time"
 
@@ -44,22 +43,36 @@ func (k *Kinsumer) becomeLeader() {
 		defer k.leaderWG.Done()
 		leaderActions := time.NewTicker(k.config.leaderActionFrequency)
 		defer func() {
+			k.logger.Debug("Stopping Leader Actions.")
 			leaderActions.Stop()
 			err := k.deregisterLeadership()
 			if err != nil {
-				k.errors <- fmt.Errorf("error deregistering leadership: %v", err)
+				k.errors <- &ShardConsumerSignal{
+					Action: "deregisterLeadership",
+					Error:  fmt.Errorf("error deregistering leadership: %v", err),
+					Level:  WarnLevel,
+				}
 			}
 		}()
 		ok, err := k.registerLeadership()
 		if err != nil {
-			k.errors <- fmt.Errorf("error registering initial leadership: %v", err)
+			k.errors <- &ShardConsumerSignal{
+				Action: "registerLeadership",
+				Error:  fmt.Errorf("error registering initial leadership: %v", err),
+				Level:  WarnLevel,
+			}
 		}
 		// Perform leadership actions immediately if we became leader. If we didn't
 		// become leader yet, wait until the first tick to try again.
 		if ok {
+			k.logger.Debug("Performing First Leader Action.")
 			err = k.performLeaderActions()
 			if err != nil {
-				k.errors <- fmt.Errorf("error performing initial leader actions: %v", err)
+				k.errors <- &ShardConsumerSignal{
+					Action: "performLeaderActions",
+					Error:  fmt.Errorf("error performing initial leader actions: %v", err),
+					Level:  WarnLevel,
+				}
 			}
 		}
 		for {
@@ -67,16 +80,25 @@ func (k *Kinsumer) becomeLeader() {
 			case <-leaderActions.C:
 				ok, err := k.registerLeadership()
 				if err != nil {
-					k.errors <- fmt.Errorf("Error registering leadership: %v", err)
+					k.errors <- &ShardConsumerSignal{
+						Action: "registerLeadership",
+						Error:  fmt.Errorf("Error registering leadership: %v", err),
+						Level:  WarnLevel,
+					}
 				}
 				if !ok {
 					continue
 				}
 				err = k.performLeaderActions()
 				if err != nil {
-					k.errors <- fmt.Errorf("Error performing repeated leader actions: %v", err)
+					k.errors <- &ShardConsumerSignal{
+						Action: "performLeaderActions",
+						Error:  fmt.Errorf("Error performing repeated leader actions: %v", err),
+						Level:  WarnLevel,
+					}
 				}
 			case <-k.leaderLost:
+				k.logger.Debug("Leader Lost.")
 				return
 			}
 		}
@@ -90,7 +112,7 @@ func (k *Kinsumer) unbecomeLeader() {
 		return
 	}
 	if k.leaderLost == nil {
-		log.Printf("Lost leadership but k.leaderLost was nil")
+		k.logger.Warn("Lost leadership but k.leaderLost was nil")
 	} else {
 		close(k.leaderLost)
 		k.leaderWG.Wait()
@@ -116,7 +138,7 @@ func (k *Kinsumer) performLeaderActions() error {
 		return fmt.Errorf("error loading shard IDs from kinesis: %v", err)
 	}
 
-	checkpoints, err := loadCheckpoints(k.dynamodb, k.checkpointTableName)
+	checkpoints, err := LoadCheckpoints(k.dynamodb, k.checkpointTableName)
 	if err != nil {
 		return fmt.Errorf("error loading shard IDs from dynamo: %v", err)
 	}
@@ -165,7 +187,7 @@ func (k *Kinsumer) setCachedShardIDs(shardIDs []string) error {
 
 // diffShardIDs takes the current shard IDs and cached shards and returns the new sorted cache, ignoring
 // finished shards correctly.
-func diffShardIDs(curShardIDs, cachedShardIDs []string, checkpoints map[string]*checkpointRecord) (updatedShardIDs []string, changed bool) {
+func diffShardIDs(curShardIDs, cachedShardIDs []string, checkpoints map[string]*CheckpointRecord) (updatedShardIDs []string, changed bool) {
 	// Look for differences, ignoring Finished shards.
 	cur := make(map[string]bool)
 	for _, s := range curShardIDs {

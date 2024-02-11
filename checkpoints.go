@@ -12,11 +12,12 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
+	statsd "github.com/ericksonjoseph/kinsumer/statsd"
 )
 
 // Note: Not thread safe!
 
-type checkpointer struct {
+type Checkpointer struct {
 	shardID               string
 	tableName             string
 	dynamodb              dynamodbiface.DynamoDBAPI
@@ -24,15 +25,16 @@ type checkpointer struct {
 	ownerName             string
 	ownerID               string
 	maxAgeForClientRecord time.Duration
-	stats                 StatReceiver
+	stats                 statsd.StatReceiver
 	captured              bool
 	dirty                 bool
 	mutex                 sync.Mutex
 	finished              bool
 	finalSequenceNumber   string
+	logger                loggerInterface
 }
 
-type checkpointRecord struct {
+type CheckpointRecord struct {
 	Shard          string
 	SequenceNumber *string // last read sequence number, null if the shard has never been consumed
 	LastUpdate     int64   // timestamp of last commit/ownership change
@@ -48,14 +50,15 @@ type checkpointRecord struct {
 
 // capture is a non-blocking call that attempts to capture the given shard/checkpoint.
 // It returns a checkpointer on success, or nil if it fails to capture the checkpoint
-func capture(
+func Capture(
 	shardID string,
 	tableName string,
 	dynamodbiface dynamodbiface.DynamoDBAPI,
 	ownerName string,
 	ownerID string,
 	maxAgeForClientRecord time.Duration,
-	stats StatReceiver) (*checkpointer, error) {
+	stats statsd.StatReceiver,
+	log loggerInterface) (*Checkpointer, error) {
 
 	cutoff := time.Now().Add(-maxAgeForClientRecord).UnixNano()
 
@@ -73,7 +76,7 @@ func capture(
 	}
 
 	// Convert to struct so we can work with the values
-	var record checkpointRecord
+	var record CheckpointRecord
 	if err = dynamodbattribute.UnmarshalMap(resp.Item, &record); err != nil {
 		return nil, err
 	}
@@ -112,7 +115,7 @@ func capture(
 		TableName: aws.String(tableName),
 		Item:      item,
 		// The OwnerID doesn't exist if the entry doesn't exist, but PutItem with a marshaled
-		// checkpointRecord sets a nil OwnerID to the NULL type.
+		// CheckpointRecord sets a nil OwnerID to the NULL type.
 		ConditionExpression: aws.String(
 			"attribute_not_exists(OwnerID) OR attribute_type(OwnerID, :nullType) OR LastUpdate <= :cutoff"),
 		ExpressionAttributeValues: attrVals,
@@ -124,7 +127,7 @@ func capture(
 		return nil, err
 	}
 
-	checkpointer := &checkpointer{
+	checkpointer := &Checkpointer{
 		shardID:               shardID,
 		tableName:             tableName,
 		dynamodb:              dynamodbiface,
@@ -134,30 +137,44 @@ func capture(
 		sequenceNumber:        aws.StringValue(record.SequenceNumber),
 		maxAgeForClientRecord: maxAgeForClientRecord,
 		captured:              true,
+		logger:                log,
 	}
 
 	return checkpointer, nil
 }
 
-// commit writes the latest SequenceNumber consumed to dynamo and updates LastUpdate.
+// Commit writes the latest SequenceNumber consumed to dynamo and updates LastUpdate.
 // Returns true if we set Finished in dynamo because the library user finished consuming the shard.
 // Once that has happened, the checkpointer should be released and never grabbed again.
-func (cp *checkpointer) commit() (bool, error) {
+func (cp *Checkpointer) Commit() (bool, error) {
+	return cp.CommitWithSequenceNumber(cp.sequenceNumber)
+}
+
+// CommitWithSequenceNumber writes the provided SequenceNumber to dynamo and updates LastUpdate.
+// Returns true if we set Finished in dynamo because the library user finished consuming the shard.
+// Once that has happened, the checkpointer should be released and never grabbed again.
+func (cp *Checkpointer) CommitWithSequenceNumber(sequenceNumber string) (bool, error) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
+	if !cp.captured {
+		// Another thread may have decided to release this checkpointer
+		// because it realized it was at the end of the stream
+		cp.logger.Debugf("Attempted to commit a checkpointer that has already been released: %s", cp.shardID)
+		return true, nil
+	}
 	if !cp.dirty && !cp.finished {
 		return false, nil
 	}
 	now := time.Now()
 
-	sn := &cp.sequenceNumber
-	if cp.sequenceNumber == "" {
+	sn := &sequenceNumber
+	if sequenceNumber == "" {
 		// We are not allowed to pass empty strings to dynamo, so instead pass a nil *string
 		// to 'unset' it
 		sn = nil
 	}
 
-	record := checkpointRecord{
+	record := CheckpointRecord{
 		Shard:          cp.shardID,
 		SequenceNumber: sn,
 		LastUpdate:     now.UnixNano(),
@@ -183,13 +200,19 @@ func (cp *checkpointer) commit() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+
+	err = cp.dynamoTableActive()
+	if err != nil {
+		return false, fmt.Errorf("CommitWithSequenceNumber, Inactive Table: %s", err)
+	}
+
 	if _, err = cp.dynamodb.PutItem(&dynamodb.PutItemInput{
 		TableName:                 aws.String(cp.tableName),
 		Item:                      item,
 		ConditionExpression:       aws.String("OwnerID = :ownerID"),
 		ExpressionAttributeValues: attrVals,
 	}); err != nil {
-		return false, fmt.Errorf("error committing checkpoint: %s", err)
+		return false, fmt.Errorf("error committing checkpoint: %s, shard ID: %v", err, cp.shardID)
 	}
 
 	if sn != nil {
@@ -199,10 +222,19 @@ func (cp *checkpointer) commit() (bool, error) {
 	return finished, nil
 }
 
-// release releases our ownership of the checkpoint in dynamo so another client can take it
-func (cp *checkpointer) release() error {
+// Release releases our ownership of the checkpoint in dynamo so another client can take it
+func (cp *Checkpointer) Release() error {
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
+	if !cp.captured {
+		// Another thread may have decided to release this checkpointer
+		// because it realized it was at the end of the stream
+		cp.logger.Debugf("Attempted to release a checkpointer that has already been released: %s", cp.shardID)
+		return nil
+	}
 	now := time.Now()
 
+	cp.logger.Debugf("Attempting to release checkpointer for Shard with ID: %v", cp.shardID)
 	attrVals, err := dynamodbattribute.MarshalMap(map[string]interface{}{
 		":ownerID":        aws.String(cp.ownerID),
 		":sequenceNumber": aws.String(cp.sequenceNumber),
@@ -231,39 +263,54 @@ func (cp *checkpointer) release() error {
 	}
 
 	cp.captured = false
+	if cp.finished == false {
+		cp.logger.Debugf("Releasing unfinished checkpoint for Shard with ID: %v", cp.shardID)
+	}
 
+	cp.logger.Debugf("Successfully released checkpointer for Shard with ID: %v", cp.shardID)
 	return nil
 }
 
-// update updates the current sequenceNumber of the checkpoint, marking it dirty if necessary
-func (cp *checkpointer) update(sequenceNumber string) {
+// Update updates the current sequenceNumber of the checkpoint, marking it dirty if necessary
+func (cp *Checkpointer) Update(sequenceNumber string) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
 	cp.dirty = cp.dirty || cp.sequenceNumber != sequenceNumber
 	cp.sequenceNumber = sequenceNumber
 }
 
-// finish marks the given sequence number as the final one for the shard.
-// sequenceNumber is the empty string if we never read anything from the shard.
-func (cp *checkpointer) finish(sequenceNumber string) {
+// Finish marks the given sequence number as the final one for the shard.
+// finalSequenceNumber is an empty string if we never read anything from the shard.
+func (cp *Checkpointer) Finish(finalSequenceNumber string) {
 	cp.mutex.Lock()
 	defer cp.mutex.Unlock()
-	cp.finalSequenceNumber = sequenceNumber
+	cp.finalSequenceNumber = finalSequenceNumber
 	cp.finished = true
 }
 
-// loadCheckpoints returns checkpoint records from dynamo mapped by shard id.
-func loadCheckpoints(db dynamodbiface.DynamoDBAPI, tableName string) (map[string]*checkpointRecord, error) {
+func (cp *Checkpointer) GetShardID() string {
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
+	return cp.shardID
+}
+func (cp *Checkpointer) GetSequenceNumber() string {
+	cp.mutex.Lock()
+	defer cp.mutex.Unlock()
+	return cp.sequenceNumber
+}
+
+// LoadCheckpoints returns checkpoint records from dynamo mapped by shard id.
+func LoadCheckpoints(db dynamodbiface.DynamoDBAPI, tableName string) (map[string]*CheckpointRecord, error) {
 	params := &dynamodb.ScanInput{
 		TableName:      aws.String(tableName),
 		ConsistentRead: aws.Bool(true),
 	}
 
-	var records []*checkpointRecord
+	var records []*CheckpointRecord
 	var innerError error
 	err := db.ScanPages(params, func(p *dynamodb.ScanOutput, lastPage bool) (shouldContinue bool) {
 		for _, item := range p.Items {
-			var record checkpointRecord
+			var record CheckpointRecord
 			innerError = dynamodbattribute.UnmarshalMap(item, &record)
 			if innerError != nil {
 				return false
@@ -282,9 +329,24 @@ func loadCheckpoints(db dynamodbiface.DynamoDBAPI, tableName string) (map[string
 		return nil, err
 	}
 
-	checkpointMap := make(map[string]*checkpointRecord, len(records))
+	checkpointMap := make(map[string]*CheckpointRecord, len(records))
 	for _, checkpoint := range records {
 		checkpointMap[checkpoint.Shard] = checkpoint
 	}
 	return checkpointMap, nil
+}
+
+// dynamoTableActive returns an error if the given table is not ACTIVE
+func (cp *Checkpointer) dynamoTableActive() error {
+	out, err := cp.dynamodb.DescribeTable(&dynamodb.DescribeTableInput{
+		TableName: aws.String(cp.tableName),
+	})
+	if err != nil {
+		return fmt.Errorf("error describing table %s: %v", cp.tableName, err)
+	}
+	status := aws.StringValue(out.Table.TableStatus)
+	if status != "ACTIVE" && status != "UPDATING" {
+		return fmt.Errorf("table %s exists but state '%s' is not 'ACTIVE' or 'UPDATING'", cp.tableName, status)
+	}
+	return nil
 }

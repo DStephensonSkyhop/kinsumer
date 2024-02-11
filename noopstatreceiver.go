@@ -13,7 +13,7 @@ type NoopStatReceiver struct {
 func (*NoopStatReceiver) Checkpoint() {}
 
 // EventToClient implementation that doesn't do anything
-func (*NoopStatReceiver) EventToClient(inserted, retrieved time.Time) {}
+func (*NoopStatReceiver) EventToClient(inserted, retrieved time.Time, size int) {}
 
 // EventsFromKinesis implementation that doesn't do anything
 func (*NoopStatReceiver) EventsFromKinesis(num int, shardID string, lag time.Duration) {}
