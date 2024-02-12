@@ -163,7 +163,7 @@ func NewWithInterfaces(logger loggerInterface, kinesisi kinesisiface.KinesisAPI,
 
 // refreshShards registers our client, refreshes the lists of clients and shards, checks if we
 // have become/unbecome the leader, and returns whether the shards/clients changed.
-//TODO: Write unit test - needs dynamo _and_ kinesis mocking
+// TODO: Write unit test - needs dynamo _and_ kinesis mocking
 func (k *Kinsumer) refreshShards() (bool, error) {
 	var shardIDs []string
 
@@ -387,7 +387,7 @@ func (k *Kinsumer) kinesisStreamReady() error {
 // Run runs the main kinesis consumer process. This is a non-blocking call, use Stop() to force it to return.
 // This goroutine is responsible for startin/stopping consumers, aggregating all consumers' records,
 // updating Checkpointers as records are consumed, and refreshing our shard/client list and leadership
-//TODO: Can we unit test this at all?
+// TODO: Can we unit test this at all?
 // funcRefresh - function pointer that will be called anytime the shards are being refreshed.
 func (k *Kinsumer) Run() error {
 	if err := k.dynamoTableActive(k.checkpointTableName); err != nil {
@@ -594,7 +594,7 @@ func (k *Kinsumer) deregisterEnhancedFanOutConsumer() {
 }
 
 // Stop stops the consumption of kinesis events
-//TODO: Can we unit test this at all?
+// TODO: Can we unit test this at all?
 func (k *Kinsumer) Stop() {
 	k.stoprequest <- true
 	k.mainWG.Wait()

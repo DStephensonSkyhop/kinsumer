@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/kinesis"
 	"github.com/aws/aws-sdk-go/service/kinesis/kinesisiface"
+	"github.com/sirupsen/logrus"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,29 +43,30 @@ func TestNewWithInterfaces(t *testing.T) {
 	s := session.Must(session.NewSession())
 	k := kinesis.New(s)
 	d := dynamodb.New(s)
+	l := logrus.New()
 
 	// No kinesis
-	_, err := NewWithInterfaces(nil, d, "stream", "app", "client", NewConfig())
+	_, err := NewWithInterfaces(l, nil, d, "stream", "app", "client", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No dynamodb
-	_, err = NewWithInterfaces(k, nil, "stream", "app", "client", NewConfig())
+	_, err = NewWithInterfaces(l, k, nil, "stream", "app", "client", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No streamName
-	_, err = NewWithInterfaces(k, d, "", "app", "client", NewConfig())
+	_, err = NewWithInterfaces(l, k, d, "", "app", "client", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// No applicationName
-	_, err = NewWithInterfaces(k, d, "stream", "", "client", NewConfig())
+	_, err = NewWithInterfaces(l, k, d, "stream", "", "client", NewConfig())
 	assert.NotEqual(t, err, nil)
 
 	// Invalid config
-	_, err = NewWithInterfaces(k, d, "stream", "app", "client", Config{})
+	_, err = NewWithInterfaces(l, k, d, "stream", "app", "client", Config{})
 	assert.NotEqual(t, err, nil)
 
 	// All ok
-	kinsumer, err := NewWithInterfaces(k, d, "stream", "app", "client", NewConfig())
+	kinsumer, err := NewWithInterfaces(l, k, d, "stream", "app", "client", NewConfig())
 	assert.Equal(t, err, nil)
 	assert.NotEqual(t, kinsumer, nil)
 }
@@ -97,14 +99,14 @@ func CreateFreshStream(t *testing.T, k kinesisiface.KinesisAPI) error {
 	return nil
 }
 
-func SetupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI) error {
+func SetupTestEnvironment(t *testing.T, l loggerInterface, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI) error {
 	err := CreateFreshStream(t, k)
 	if err != nil {
 		return fmt.Errorf("Error creating fresh stream: %s", err)
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, _ := NewWithInterfaces(k, d, "N/A", *applicationName, "N/A", testConf)
+	client, _ := NewWithInterfaces(l, k, d, "N/A", *applicationName, "N/A", testConf)
 
 	err = client.DeleteTables()
 	if err != nil {
@@ -132,7 +134,7 @@ func ignoreResourceNotFound(err error) error {
 	return nil
 }
 
-func CleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI) error {
+func CleanupTestEnvironment(t *testing.T, l loggerInterface, k kinesisiface.KinesisAPI, d dynamodbiface.DynamoDBAPI) error {
 	_, err := k.DeleteStream(&kinesis.DeleteStreamInput{
 		StreamName: streamName,
 	})
@@ -142,7 +144,7 @@ func CleanupTestEnvironment(t *testing.T, k kinesisiface.KinesisAPI, d dynamodbi
 	}
 
 	testConf := NewConfig().WithDynamoWaiterDelay(*resourceChangeTimeout)
-	client, _ := NewWithInterfaces(k, d, "N/A", *applicationName, "", testConf)
+	client, _ := NewWithInterfaces(l, k, d, "N/A", *applicationName, "", testConf)
 
 	err = client.DeleteTables()
 	if err != nil {
@@ -225,13 +227,14 @@ func TestSetup(t *testing.T) {
 	}
 
 	k, d := KinesisAndDynamoInstances()
+	l := logrus.New()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := CleanupTestEnvironment(t, l, k, d)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := SetupTestEnvironment(t, l, k, d)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	err = SpamStream(t, k, 233)
@@ -251,13 +254,14 @@ func TestKinsumer(t *testing.T) {
 	}
 
 	k, d := KinesisAndDynamoInstances()
+	l := logrus.New()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := CleanupTestEnvironment(t, l, k, d)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := SetupTestEnvironment(t, l, k, d)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	clients := make([]*Kinsumer, numberOfClients)
@@ -275,7 +279,7 @@ func TestKinsumer(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(l, k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 
 		err = clients[i].Run()
@@ -288,11 +292,11 @@ func TestKinsumer(t *testing.T) {
 			defer waitGroup.Done()
 			for {
 				data, innerError := client.Next()
-				require.NoError(t, innerError, "kinsumer.Next() failed")
+				require.NoError(t, innerError.Error, "kinsumer.Next() failed")
 				if data == nil {
 					return
 				}
-				idx, _ := strconv.Atoi(string(data))
+				idx, _ := strconv.Atoi(string(data.Record.Data))
 				output <- idx
 				eventsPerClient[ci]++
 			}
@@ -332,13 +336,14 @@ func TestLeader(t *testing.T) {
 	}
 
 	k, d := KinesisAndDynamoInstances()
+	l := logrus.New()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := CleanupTestEnvironment(t, l, k, d)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := SetupTestEnvironment(t, l, k, d)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	clients := make([]*Kinsumer, numberOfClients)
@@ -372,7 +377,7 @@ func TestLeader(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(l, k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 		clients[i].clientID = strconv.Itoa(i + 1)
 
@@ -384,11 +389,11 @@ func TestLeader(t *testing.T) {
 			defer waitGroup.Done()
 			for {
 				data, innerError := client.Next()
-				require.NoError(t, innerError, "kinsumer.Next() failed")
+				require.NoError(t, innerError.Error, "kinsumer.Next() failed")
 				if data == nil {
 					return
 				}
-				idx, _ := strconv.Atoi(string(data))
+				idx, _ := strconv.Atoi(string(data.Record.Data))
 				output <- idx
 			}
 		}(clients[i], i)
@@ -417,7 +422,7 @@ func TestLeader(t *testing.T) {
 	assert.Equal(t, true, clients[0].isLeader, "First client is not leader")
 	assert.Equal(t, false, clients[1].isLeader, "Second leader is also leader")
 
-	c, err := NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), config)
+	c, err := NewWithInterfaces(l, k, d, *streamName, *applicationName, fmt.Sprintf("_test_%d", numberOfClients), config)
 	require.NoError(t, err, "NewWithInterfaces() failed")
 	c.clientID = "0"
 	err = c.Run()
@@ -450,13 +455,14 @@ func TestSplit(t *testing.T) {
 	}
 
 	k, d := KinesisAndDynamoInstances()
+	l := logrus.New()
 
 	defer func() {
-		err := CleanupTestEnvironment(t, k, d)
+		err := CleanupTestEnvironment(t, l, k, d)
 		require.NoError(t, err, "Problems cleaning up the test environment")
 	}()
 
-	err := SetupTestEnvironment(t, k, d)
+	err := SetupTestEnvironment(t, l, k, d)
 	require.NoError(t, err, "Problems setting up the test environment")
 
 	clients := make([]*Kinsumer, numberOfClients)
@@ -474,7 +480,7 @@ func TestSplit(t *testing.T) {
 			time.Sleep(50 * time.Millisecond) // Add the clients slowly
 		}
 
-		clients[i], err = NewWithInterfaces(k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
+		clients[i], err = NewWithInterfaces(l, k, d, *streamName, *applicationName, fmt.Sprintf("test_%d", i), config)
 		require.NoError(t, err, "NewWithInterfaces() failed")
 		clients[i].clientID = strconv.Itoa(i + 1)
 
@@ -486,11 +492,11 @@ func TestSplit(t *testing.T) {
 			defer waitGroup.Done()
 			for {
 				data, innerError := client.Next()
-				require.NoError(t, innerError, "kinsumer.Next() failed")
+				require.NoError(t, innerError.Error, "kinsumer.Next() failed")
 				if data == nil {
 					return
 				}
-				idx, _ := strconv.Atoi(string(data))
+				idx, _ := strconv.Atoi(string(data.Record.Data))
 				output <- idx
 			}
 		}(clients[i], i)
